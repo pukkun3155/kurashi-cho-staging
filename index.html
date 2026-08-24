@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#315947">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="くらし帖">
+  <meta name="description" content="かいもの帖と持ち物台帳をひとつにまとめて確認する統合テスト版">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="stylesheet" href="./style.css">
+  <title>くらし帖｜統合テスト版</title>
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div>
+        <p class="eyebrow">統合テスト版</p>
+        <h1>🏠 くらし帖</h1>
+      </div>
+      <button id="refresh-btn" class="icon-btn" aria-label="表示を更新" title="表示を更新">↻</button>
+    </header>
+
+    <main id="main" tabindex="-1">
+      <section id="view-home" class="view active" aria-labelledby="home-title">
+        <div class="hero">
+          <div>
+            <p class="eyebrow">買い物・在庫・持ち物をひとつの入口から</p>
+            <h2 id="home-title">今日のくらし</h2>
+          </div>
+          <span id="sync-badge" class="badge">未統合</span>
+        </div>
+
+        <label class="search-wrap">
+          <span>まとめて検索</span>
+          <input id="global-search" type="search" placeholder="商品名・品名・場所で検索">
+        </label>
+        <div id="search-results" class="search-results" hidden></div>
+
+        <div class="stats" aria-label="登録件数">
+          <button class="stat-card" data-go="shopping"><span>🛒</span><strong id="shopping-count">0</strong><small>買うもの</small></button>
+          <button class="stat-card" data-go="inventory"><span>🥫</span><strong id="inventory-count">0</strong><small>在庫</small></button>
+          <button class="stat-card" data-go="belongings"><span>📦</span><strong id="belongings-count">0</strong><small>持ち物</small></button>
+        </div>
+
+        <section class="card attention-card">
+          <div class="section-heading">
+            <div><p class="eyebrow">確認しておきたいこと</p><h3>今日の候補</h3></div>
+          </div>
+          <div id="today-summary"></div>
+        </section>
+
+        <section class="card">
+          <div class="section-heading">
+            <div><p class="eyebrow">元のアプリはそのまま</p><h3>登録・編集する</h3></div>
+          </div>
+          <p class="muted">第1段階では、編集は元アプリで行います。編集後にこの画面の↻を押すと読み直せます。</p>
+          <div class="action-grid">
+            <a class="action-link" href="https://pukkun3155.github.io/kaimono-memo/">🛒 かいもの帖を開く</a>
+            <a class="action-link" href="https://pukkun3155.github.io/mochimon-dacho/">📦 持ち物台帳を開く</a>
+          </div>
+        </section>
+      </section>
+
+      <section id="view-shopping" class="view" aria-labelledby="shopping-title">
+        <div class="page-title"><p class="eyebrow">かいもの帖</p><h2 id="shopping-title">🛒 買うもの</h2></div>
+        <div id="shopping-list" class="list"></div>
+      </section>
+
+      <section id="view-inventory" class="view" aria-labelledby="inventory-title">
+        <div class="page-title"><p class="eyebrow">かいもの帖</p><h2 id="inventory-title">🥫 在庫</h2></div>
+        <label class="search-wrap compact"><span>在庫を検索</span><input id="inventory-search" type="search" placeholder="商品名で検索"></label>
+        <div id="inventory-list" class="list"></div>
+      </section>
+
+      <section id="view-belongings" class="view" aria-labelledby="belongings-title">
+        <div class="page-title"><p class="eyebrow">持ち物台帳</p><h2 id="belongings-title">📦 持ち物</h2></div>
+        <label class="search-wrap compact"><span>持ち物を検索</span><input id="belongings-search" type="search" placeholder="品名・場所・メモで検索"></label>
+        <div class="filters">
+          <select id="belongings-category" aria-label="カテゴリで絞り込み"><option value="">すべてのカテゴリ</option></select>
+          <select id="belongings-location" aria-label="場所で絞り込み"><option value="">すべての場所</option></select>
+        </div>
+        <div id="belongings-list" class="list"></div>
+      </section>
+
+      <section id="view-settings" class="view" aria-labelledby="settings-title">
+        <div class="page-title"><p class="eyebrow">データ管理</p><h2 id="settings-title">⚙️ 設定</h2></div>
+        <section class="card">
+          <h3>統合データ</h3>
+          <div id="migration-status" class="status-box"></div>
+          <button id="import-sources-btn" class="primary-btn">元アプリから統合用データを作る</button>
+          <p class="notice">元の保存データは削除・変更しません。統合版専用のコピーを作成します。</p>
+        </section>
+        <section class="card">
+          <h3>バックアップ</h3>
+          <div class="button-stack">
+            <button id="export-btn">統合データをJSONで書き出す</button>
+            <button id="import-btn">統合データをJSONから読み込む</button>
+            <input id="import-file" type="file" accept="application/json,.json" hidden>
+          </div>
+        </section>
+        <section class="card danger-zone">
+          <h3>統合用コピーだけを削除</h3>
+          <p class="muted">かいもの帖と持ち物台帳の元データには影響しません。</p>
+          <button id="clear-integrated-btn" class="danger-btn">統合用データを削除</button>
+        </section>
+      </section>
+    </main>
+
+    <nav class="tabbar" aria-label="メインメニュー">
+      <button class="tab active" data-view="home"><span>⌂</span><small>ホーム</small></button>
+      <button class="tab" data-view="shopping"><span>🛒</span><small>買うもの</small></button>
+      <button class="tab" data-view="inventory"><span>🥫</span><small>在庫</small></button>
+      <button class="tab" data-view="belongings"><span>📦</span><small>持ち物</small></button>
+      <button class="tab" data-view="settings"><span>⚙</span><small>設定</small></button>
+    </nav>
+  </div>
+
+  <div id="migration-modal" class="modal-wrap" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="migration-title">
+      <p class="eyebrow">初回だけの確認</p>
+      <h2 id="migration-title">既存データを統合版へコピー</h2>
+      <p>この端末から次のデータを検出しました。</p>
+      <div id="detected-counts" class="detected-counts"></div>
+      <div class="modal-actions">
+        <button id="migration-later">あとで</button>
+        <button id="migration-confirm" class="primary-btn">統合用データを作る</button>
+      </div>
+      <p class="notice">元データはそのまま残り、統合版から削除・変更されません。</p>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="./app.js" defer></script>
+</body>
+</html>

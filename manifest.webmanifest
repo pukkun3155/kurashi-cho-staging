@@ -1,0 +1,11 @@
+{
+  "name":"くらし帖 統合テスト版",
+  "short_name":"くらし帖",
+  "description":"かいもの帖と持ち物台帳をまとめて確認",
+  "start_url":"./",
+  "scope":"./",
+  "display":"standalone",
+  "background_color":"#f6f3eb",
+  "theme_color":"#315947",
+  "lang":"ja"
+}
