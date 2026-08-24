@@ -1,8 +1,7 @@
-const KEYS={integrated:'kurashi-cho-v1',shopping:'kaimono-memo-v1',belongings:'mochimon-v7'};
-const VERSION='1.0.0';
-let state=null;
-let toastTimer=null;
-
+const KEYS={integrated:'kurashi-cho-v1',backup:'kurashi-cho-v1.backup-before-source-import',shopping:'kaimono-memo-v1',belongings:'mochimon-v7'};
+const VERSION='1.1.0';
+const CATEGORIES=['その他','衣類','書類','工具','季節用品','食品','家電','日用品'];
+let state=null,toastTimer=null,belongingEditId=null,inventoryEditId=null,purchaseShoppingId=null;
 const $=id=>document.getElementById(id);
 const readJson=key=>{try{const raw=localStorage.getItem(key);return raw?JSON.parse(raw):null}catch{return null}};
 const writeJson=(key,value)=>localStorage.setItem(key,JSON.stringify(value));
@@ -10,191 +9,54 @@ const norm=value=>String(value??'').normalize('NFKC').toLocaleLowerCase('ja-JP')
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const array=value=>Array.isArray(value)?value:[];
 const nowIso=()=>new Date().toISOString();
+const today=()=>{const d=new Date(),pad=n=>String(n).padStart(2,'0');return`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`};
+const uid=prefix=>`${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,7)}`;
 
-function sourceSnapshot(){
-  const shopping=readJson(KEYS.shopping);
-  const belongings=readJson(KEYS.belongings);
-  return {
-    shopping:shopping&&typeof shopping==='object'&&!Array.isArray(shopping)?shopping:null,
-    belongings:Array.isArray(belongings)?belongings:null
-  };
-}
+function sourceSnapshot(){const shopping=readJson(KEYS.shopping),belongings=readJson(KEYS.belongings);return{shopping:shopping&&typeof shopping==='object'&&!Array.isArray(shopping)?shopping:null,belongings:Array.isArray(belongings)?belongings:null}}
+function normalizeState(value){const shopping=value?.shopping&&typeof value.shopping==='object'?value.shopping:{};shopping.shoppingList=array(shopping.shoppingList).map(i=>({...i,id:i.id||uid('shop')}));shopping.inventory=array(shopping.inventory).map(i=>({...i,id:i.id||uid('inv')}));shopping.purchaseLog=array(shopping.purchaseLog);shopping.inventoryLog=array(shopping.inventoryLog);return{...value,shopping,belongings:array(value?.belongings).map(i=>({...i,id:i.id||uid('item')}))}}
+function buildIntegrated(source){return normalizeState({metadata:{schemaVersion:VERSION,createdAt:state?.metadata?.createdAt||nowIso(),updatedAt:nowIso(),sourceKeys:[KEYS.shopping,KEYS.belongings],mode:'integrated-editing'},shopping:source.shopping||{inventory:[],shoppingList:[],purchaseLog:[],inventoryLog:[]},belongings:source.belongings||[]})}
+function validIntegrated(value){return!!value&&typeof value==='object'&&!Array.isArray(value)&&value.shopping&&Array.isArray(value.belongings)}
+function counts(data){return{shopping:array(data?.shopping?.shoppingList).length,inventory:array(data?.shopping?.inventory).length,belongings:array(data?.belongings).length}}
+function persist(message){state.metadata={...(state.metadata||{}),schemaVersion:VERSION,mode:'integrated-editing',updatedAt:nowIso()};writeJson(KEYS.integrated,state);renderAll();if(message)showToast(message)}
+function load(){const saved=readJson(KEYS.integrated);state=validIntegrated(saved)?normalizeState(saved):buildIntegrated({shopping:null,belongings:null});renderAll();if(!validIntegrated(saved))showMigrationIfAvailable()}
+function showMigrationIfAvailable(){const source=sourceSnapshot();if(!source.shopping&&!source.belongings)return;const c=counts(source);$('detected-counts').innerHTML=`買うもの <strong>${c.shopping}件</strong><br>在庫 <strong>${c.inventory}件</strong><br>持ち物 <strong>${c.belongings}件</strong>`;$('migration-modal').hidden=false}
+function importSources(){const source=sourceSnapshot();if(!source.shopping&&!source.belongings){showToast('この端末に元アプリのデータが見つかりません');return}if(readJson(KEYS.integrated))writeJson(KEYS.backup,state);state=buildIntegrated(source);writeJson(KEYS.integrated,state);$('migration-modal').hidden=true;renderAll();const c=counts(state);showToast(`取り込みました（合計${c.shopping+c.inventory+c.belongings}件）`)}
 
-function counts(data){
-  return {
-    shopping:array(data?.shopping?.shoppingList).length,
-    inventory:array(data?.shopping?.inventory).length,
-    belongings:array(data?.belongings).length
-  };
-}
+function renderAll(){const c=counts(state);$('shopping-count').textContent=c.shopping;$('inventory-count').textContent=c.inventory;$('belongings-count').textContent=c.belongings;const integrated=!!readJson(KEYS.integrated);$('sync-badge').textContent=integrated?'利用中':'未統合';$('sync-badge').classList.toggle('ok',integrated);renderToday();renderShopping();renderInventory();renderBelongingFilters();renderBelongings();renderSettings()}
+function renderToday(){const shopping=array(state.shopping.shoppingList).slice(0,5),unknown=array(state.shopping.inventory).filter(i=>i.confirmedQuantity==null).slice(0,3);const rows=[...shopping.map(i=>({label:i.productName||'名称未設定',meta:`買うもの${i.plannedQuantity!=null?`・${i.plannedQuantity}${i.unit||''}`:''}`})),...unknown.map(i=>({label:i.productName||'名称未設定',meta:'在庫数を確認'}))];$('today-summary').innerHTML=rows.length?rows.map(r=>`<div class="summary-row"><strong>${esc(r.label)}</strong><span>${esc(r.meta)}</span></div>`).join(''):'<div class="empty">今日確認する候補はありません</div>'}
+function renderShopping(){const items=array(state.shopping.shoppingList);$('shopping-list').innerHTML=items.length?items.map(i=>`<article class="list-card"><h3>${esc(i.productName||'名称未設定')}</h3><div class="meta"><span>${i.plannedQuantity!=null?`予定 ${esc(i.plannedQuantity)}${esc(i.unit||'')}`:'数量未設定'}</span>${i.note?`<span>${esc(i.note)}</span>`:''}</div><div class="item-actions"><button class="primary-small" data-action="buy-inventory" data-id="${esc(i.id)}">購入→在庫</button><button data-action="buy-belonging" data-id="${esc(i.id)}">購入→持ち物</button><button class="danger-small" data-action="delete-shopping" data-id="${esc(i.id)}">削除</button></div></article>`).join(''):'<div class="empty">買い物リストは空です</div>'}
+function renderInventory(){const q=norm($('inventory-search').value),items=array(state.shopping.inventory).filter(i=>!q||norm([i.productName,i.note,i.category].join(' ')).includes(q));$('inventory-list').innerHTML=items.length?items.map(i=>`<article class="list-card"><h3>${esc(i.productName||'名称未設定')}</h3><div class="meta"><span class="pill">${i.confirmedQuantity==null?'要確認':`${esc(i.confirmedQuantity)}${esc(i.unit||'')}`}</span>${i.lastConfirmedDate?`<span>確認 ${esc(i.lastConfirmedDate)}</span>`:''}${i.note?`<span>${esc(i.note)}</span>`:''}</div><div class="item-actions"><button data-action="edit-inventory" data-id="${esc(i.id)}">数量・商品を編集</button><button class="danger-small" data-action="delete-inventory" data-id="${esc(i.id)}">削除</button></div></article>`).join(''):'<div class="empty">該当する在庫はありません</div>'}
+function renderBelongingFilters(){const items=array(state.belongings),category=$('belongings-category'),location=$('belongings-location'),cv=category.value,lv=location.value;const cats=[...new Set(items.map(i=>i.category).filter(Boolean))].sort(),locs=[...new Set(items.map(i=>i.location).filter(Boolean))].sort();category.innerHTML='<option value="">すべてのカテゴリ</option>'+cats.map(v=>`<option value="${esc(v)}">${esc(v)}</option>`).join('');location.innerHTML='<option value="">すべての場所</option>'+locs.map(v=>`<option value="${esc(v)}">${esc(v)}</option>`).join('');category.value=cats.includes(cv)?cv:'';location.value=locs.includes(lv)?lv:'';$('location-options').innerHTML=locs.map(v=>`<option value="${esc(v)}"></option>`).join('')}
+function renderBelongings(){const q=norm($('belongings-search').value),cat=$('belongings-category').value,loc=$('belongings-location').value;const items=array(state.belongings).filter(i=>(!q||norm([i.name,i.location,i.detail].join(' ')).includes(q))&&(!cat||i.category===cat)&&(!loc||i.location===loc));$('belongings-list').innerHTML=items.length?items.map(i=>`<article class="list-card"><h3>${esc(i.name||'名称未設定')}</h3><div class="meta"><span class="pill">📍 ${esc(i.location||'場所未設定')}</span>${i.category?`<span>${esc(i.category)}</span>`:''}${i.detail?`<span>${esc(i.detail)}</span>`:''}</div><div class="item-actions"><button data-action="edit-belonging" data-id="${esc(i.id)}">編集・移動</button><button class="danger-small" data-action="delete-belonging" data-id="${esc(i.id)}">削除</button></div></article>`).join(''):'<div class="empty">該当する持ち物はありません</div>'}
+function renderSettings(){const c=counts(state),integrated=readJson(KEYS.integrated);$('migration-status').innerHTML=integrated?`最終更新：<strong>${esc(new Date(state.metadata.updatedAt).toLocaleString('ja-JP'))}</strong><br>買うもの ${c.shopping}件 ／ 在庫 ${c.inventory}件 ／ 持ち物 ${c.belongings}件`:'まだ統合データを作成していません。';$('import-sources-btn').textContent=integrated?'元アプリのデータで置き換える':'元アプリから統合データを作る'}
 
-function buildIntegrated(source){
-  return {
-    metadata:{schemaVersion:VERSION,createdAt:state?.metadata?.createdAt||nowIso(),updatedAt:nowIso(),sourceKeys:[KEYS.shopping,KEYS.belongings],mode:'copy-only'},
-    shopping:source.shopping||{inventory:[],shoppingList:[],purchaseLog:[],inventoryLog:[]},
-    belongings:source.belongings||[]
-  };
-}
+function addShopping(){const name=$('shopping-name').value.trim();if(!name){showToast('商品名を入力してください');return}const raw=$('shopping-qty').value,qty=raw===''?null:Number(raw);state.shopping.shoppingList.push({id:uid('shop'),productName:name,plannedQuantity:Number.isFinite(qty)?qty:null,unit:$('shopping-unit').value.trim()||null,note:$('shopping-note').value.trim()||null,createdAt:nowIso()});['shopping-name','shopping-qty','shopping-unit','shopping-note'].forEach(id=>$(id).value='');persist('買うものに追加しました')}
+function recordPurchase(item,qty){state.shopping.purchaseLog.push({id:uid('purchase'),date:today(),productName:item.productName,quantity:qty,unit:item.unit||'',sourceShoppingId:item.id})}
+function removeShopping(id){state.shopping.shoppingList=state.shopping.shoppingList.filter(i=>i.id!==id)}
+function purchaseToInventory(id){const item=state.shopping.shoppingList.find(i=>i.id===id);if(!item)return;const qty=Number(item.plannedQuantity)>0?Number(item.plannedQuantity):1,existing=state.shopping.inventory.find(i=>norm(i.productName)===norm(item.productName));if(existing){existing.confirmedQuantity=(Number(existing.confirmedQuantity)||0)+qty;existing.unit=existing.unit||item.unit||null;existing.lastConfirmedDate=today()}else state.shopping.inventory.push({id:uid('inv'),productName:item.productName,confirmedQuantity:qty,unit:item.unit||null,lastConfirmedDate:today(),category:'consumable',note:item.note||'買い物リストから登録'});recordPurchase(item,qty);removeShopping(id);persist(`${item.productName}を在庫へ登録しました`)}
 
-function validIntegrated(value){
-  return !!value&&typeof value==='object'&&!Array.isArray(value)&&value.metadata?.schemaVersion&&value.shopping&&Array.isArray(value.belongings);
-}
+function openBelongingModal(id=null,shoppingId=null){belongingEditId=id;purchaseShoppingId=shoppingId;const item=id?state.belongings.find(i=>i.id===id):null,shop=shoppingId?state.shopping.shoppingList.find(i=>i.id===shoppingId):null;$('belonging-modal-title').textContent=shoppingId?'購入品を持ち物へ登録':id?'持ち物を編集・移動':'持ち物を追加';$('belonging-name').value=item?.name||shop?.productName||'';$('belonging-location').value=item?.location||'';$('belonging-detail').value=item?.detail||shop?.note||'';$('belonging-category-edit').innerHTML=CATEGORIES.map(c=>`<option>${esc(c)}</option>`).join('');$('belonging-category-edit').value=item?.category||'その他';$('belonging-modal').hidden=false;setTimeout(()=>$('belonging-name').focus(),30)}
+function saveBelonging(){const name=$('belonging-name').value.trim(),location=$('belonging-location').value.trim();if(!name||!location){showToast('品名と場所を入力してください');return}const wasEdit=!!belongingEditId,values={name,location,category:$('belonging-category-edit').value,detail:$('belonging-detail').value.trim(),updatedAt:today()};if(belongingEditId){const index=state.belongings.findIndex(i=>i.id===belongingEditId);if(index>=0)state.belongings[index]={...state.belongings[index],...values}}else state.belongings.push({id:uid('item'),savedAt:today(),...values});if(purchaseShoppingId){const shop=state.shopping.shoppingList.find(i=>i.id===purchaseShoppingId);if(shop){recordPurchase(shop,Number(shop.plannedQuantity)>0?Number(shop.plannedQuantity):1);removeShopping(shop.id)}}closeBelongingModal();persist(wasEdit?'持ち物を更新しました':'持ち物を登録しました')}
+function closeBelongingModal(){$('belonging-modal').hidden=true;belongingEditId=null;purchaseShoppingId=null}
+function openInventoryModal(id=null){inventoryEditId=id;const item=id?state.shopping.inventory.find(i=>i.id===id):null;$('inventory-modal-title').textContent=id?'在庫を編集':'在庫を追加';$('inventory-name-edit').value=item?.productName||'';$('inventory-qty-edit').value=item?.confirmedQuantity??'';$('inventory-unit-edit').value=item?.unit||'';$('inventory-note-edit').value=item?.note||'';$('inventory-modal').hidden=false;setTimeout(()=>$('inventory-name-edit').focus(),30)}
+function saveInventory(){const name=$('inventory-name-edit').value.trim(),raw=$('inventory-qty-edit').value,qty=Number(raw),wasEdit=!!inventoryEditId;if(!name||raw===''||!Number.isFinite(qty)||qty<0){showToast('商品名と0以上の数量を入力してください');return}const values={productName:name,confirmedQuantity:qty,unit:$('inventory-unit-edit').value.trim()||null,note:$('inventory-note-edit').value.trim()||null,lastConfirmedDate:today()};if(inventoryEditId){const index=state.shopping.inventory.findIndex(i=>i.id===inventoryEditId);if(index>=0)state.shopping.inventory[index]={...state.shopping.inventory[index],...values}}else state.shopping.inventory.push({id:uid('inv'),category:'consumable',...values});closeInventoryModal();persist(wasEdit?'在庫を更新しました':'在庫を追加しました')}
+function closeInventoryModal(){$('inventory-modal').hidden=true;inventoryEditId=null}
+function handleListAction(event){const button=event.target.closest('[data-action]');if(!button)return;const{id,action}=button.dataset;if(action==='buy-inventory')purchaseToInventory(id);if(action==='buy-belonging')openBelongingModal(null,id);if(action==='edit-belonging')openBelongingModal(id);if(action==='edit-inventory')openInventoryModal(id);if(action==='delete-shopping'&&confirm('この買うものを削除しますか？')){removeShopping(id);persist('買うものから削除しました')}if(action==='delete-belonging'&&confirm('この持ち物を削除しますか？')){state.belongings=state.belongings.filter(i=>i.id!==id);persist('持ち物を削除しました')}if(action==='delete-inventory'&&confirm('この在庫を削除しますか？')){state.shopping.inventory=state.shopping.inventory.filter(i=>i.id!==id);persist('在庫を削除しました')}}
 
-function load(){
-  const saved=readJson(KEYS.integrated);
-  state=validIntegrated(saved)?saved:buildIntegrated({shopping:null,belongings:null});
-  renderAll();
-  if(!validIntegrated(saved)) showMigrationIfAvailable();
-}
-
-function showMigrationIfAvailable(){
-  const source=sourceSnapshot();
-  if(!source.shopping&&!source.belongings)return;
-  const c=counts(source);
-  $('detected-counts').innerHTML=`買うもの <strong>${c.shopping}件</strong><br>在庫 <strong>${c.inventory}件</strong><br>持ち物 <strong>${c.belongings}件</strong>`;
-  $('migration-modal').hidden=false;
-}
-
-function importSources(){
-  const source=sourceSnapshot();
-  if(!source.shopping&&!source.belongings){showToast('この端末に元アプリのデータが見つかりません');return}
-  state=buildIntegrated(source);
-  writeJson(KEYS.integrated,state);
-  $('migration-modal').hidden=true;
-  renderAll();
-  const c=counts(state);
-  showToast(`統合用コピーを作成しました（合計${c.shopping+c.inventory+c.belongings}件）`);
-}
-
-function renderAll(){
-  const c=counts(state);
-  $('shopping-count').textContent=c.shopping;
-  $('inventory-count').textContent=c.inventory;
-  $('belongings-count').textContent=c.belongings;
-  const integrated=!!readJson(KEYS.integrated);
-  $('sync-badge').textContent=integrated?'統合済み':'未統合';
-  $('sync-badge').classList.toggle('ok',integrated);
-  renderToday();renderShopping();renderInventory();renderBelongingFilters();renderBelongings();renderSettings();
-}
-
-function renderToday(){
-  const shopping=array(state.shopping?.shoppingList).slice(0,5);
-  const unknown=array(state.shopping?.inventory).filter(i=>i.confirmedQuantity==null).slice(0,3);
-  const rows=[
-    ...shopping.map(i=>({label:i.productName||'名称未設定',meta:`買うもの${i.plannedQuantity!=null?`・${i.plannedQuantity}${i.unit||''}`:''}`})),
-    ...unknown.map(i=>({label:i.productName||'名称未設定',meta:'在庫数を確認'}))
-  ];
-  $('today-summary').innerHTML=rows.length?rows.map(r=>`<div class="summary-row"><strong>${esc(r.label)}</strong><span>${esc(r.meta)}</span></div>`).join(''):'<div class="empty">今日確認する候補はありません</div>';
-}
-
-function renderShopping(){
-  const items=array(state.shopping?.shoppingList);
-  $('shopping-list').innerHTML=items.length?items.map(i=>`<article class="list-card"><h3>${esc(i.productName||'名称未設定')}</h3><div class="meta"><span>${i.plannedQuantity!=null?`予定 ${esc(i.plannedQuantity)}${esc(i.unit||'')}`:'数量未設定'}</span>${i.note?`<span>${esc(i.note)}</span>`:''}</div></article>`).join(''):'<div class="empty">買い物リストは空です</div>';
-}
-
-function renderInventory(){
-  const q=norm($('inventory-search').value);
-  const items=array(state.shopping?.inventory).filter(i=>!q||norm([i.productName,i.note,i.category].join(' ')).includes(q));
-  $('inventory-list').innerHTML=items.length?items.map(i=>`<article class="list-card"><h3>${esc(i.productName||'名称未設定')}</h3><div class="meta"><span class="pill">${i.confirmedQuantity==null?'要確認':`${esc(i.confirmedQuantity)}${esc(i.unit||'')}`}</span>${i.lastConfirmedDate?`<span>確認 ${esc(i.lastConfirmedDate)}</span>`:''}${i.note?`<span>${esc(i.note)}</span>`:''}</div></article>`).join(''):'<div class="empty">該当する在庫はありません</div>';
-}
-
-function renderBelongingFilters(){
-  const items=array(state.belongings);
-  const category=$('belongings-category'),location=$('belongings-location');
-  const cv=category.value,lv=location.value;
-  const cats=[...new Set(items.map(i=>i.category).filter(Boolean))].sort();
-  const locs=[...new Set(items.map(i=>i.location).filter(Boolean))].sort();
-  category.innerHTML='<option value="">すべてのカテゴリ</option>'+cats.map(v=>`<option value="${esc(v)}">${esc(v)}</option>`).join('');
-  location.innerHTML='<option value="">すべての場所</option>'+locs.map(v=>`<option value="${esc(v)}">${esc(v)}</option>`).join('');
-  category.value=cats.includes(cv)?cv:'';location.value=locs.includes(lv)?lv:'';
-}
-
-function renderBelongings(){
-  const q=norm($('belongings-search').value),cat=$('belongings-category').value,loc=$('belongings-location').value;
-  const items=array(state.belongings).filter(i=>(!q||norm([i.name,i.location,i.detail].join(' ')).includes(q))&&(!cat||i.category===cat)&&(!loc||i.location===loc));
-  $('belongings-list').innerHTML=items.length?items.map(i=>`<article class="list-card"><h3>${esc(i.name||'名称未設定')}</h3><div class="meta"><span class="pill">📍 ${esc(i.location||'場所未設定')}</span>${i.category?`<span>${esc(i.category)}</span>`:''}${i.detail?`<span>${esc(i.detail)}</span>`:''}</div></article>`).join(''):'<div class="empty">該当する持ち物はありません</div>';
-}
-
-function renderSettings(){
-  const c=counts(state),integrated=readJson(KEYS.integrated);
-  $('migration-status').innerHTML=integrated?`最終取り込み：<strong>${esc(new Date(state.metadata.updatedAt).toLocaleString('ja-JP'))}</strong><br>買うもの ${c.shopping}件 ／ 在庫 ${c.inventory}件 ／ 持ち物 ${c.belongings}件`:'まだ統合用データを作成していません。';
-  $('import-sources-btn').textContent=integrated?'元アプリから最新データを再取り込み':'元アプリから統合用データを作る';
-}
-
-function showView(name){
-  document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active',v.id===`view-${name}`));
-  document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===name));
-  window.scrollTo({top:0,behavior:'smooth'});
-  $('main').focus({preventScroll:true});
-}
-
-function globalSearch(){
-  const q=norm($('global-search').value),box=$('search-results');
-  if(!q){box.hidden=true;box.innerHTML='';return}
-  const results=[];
-  array(state.shopping?.shoppingList).forEach(i=>{if(norm([i.productName,i.note].join(' ')).includes(q))results.push({kind:'買うもの',name:i.productName,meta:i.note||''})});
-  array(state.shopping?.inventory).forEach(i=>{if(norm([i.productName,i.note].join(' ')).includes(q))results.push({kind:'在庫',name:i.productName,meta:i.confirmedQuantity==null?'数量要確認':`${i.confirmedQuantity}${i.unit||''}`})});
-  array(state.belongings).forEach(i=>{if(norm([i.name,i.location,i.detail].join(' ')).includes(q))results.push({kind:'持ち物',name:i.name,meta:i.location||''})});
-  box.hidden=false;
-  box.innerHTML=results.length?results.slice(0,20).map(r=>`<div class="result-row"><div class="result-kind">${esc(r.kind)}</div><strong>${esc(r.name||'名称未設定')}</strong>${r.meta?`<div class="meta">${esc(r.meta)}</div>`:''}</div>`).join(''):'<div class="empty">見つかりませんでした</div>';
-}
-
-function exportIntegrated(){
-  if(!readJson(KEYS.integrated)){showToast('先に統合用データを作成してください');return}
-  const blob=new Blob([JSON.stringify(state,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');
-  a.href=url;a.download=`kurashi-cho-backup-${new Date().toISOString().slice(0,10)}.json`;a.click();URL.revokeObjectURL(url);showToast('統合データを書き出しました');
-}
-
-async function importFile(file){
-  try{const parsed=JSON.parse(await file.text());if(!validIntegrated(parsed))throw new Error('統合版のJSON形式ではありません');state=parsed;state.metadata.updatedAt=nowIso();writeJson(KEYS.integrated,state);renderAll();showToast('統合データを読み込みました')}catch(e){showToast(`読み込めませんでした：${e.message}`)}
-}
-
-async function importSourceFile(file){
-  try{
-    const parsed=JSON.parse(await file.text());
-    if(validIntegrated(parsed)){
-      state=parsed;state.metadata.updatedAt=nowIso();writeJson(KEYS.integrated,state);renderAll();showToast('統合版のバックアップを読み込みました');return;
-    }
-    let kind=null,data=null;
-    if(Array.isArray(parsed)){kind='belongings';data=parsed}
-    else if(Array.isArray(parsed?.ledger)){kind='belongings';data=parsed.ledger}
-    else if(Array.isArray(parsed?.inventory)&&Array.isArray(parsed?.shoppingList)){kind='shopping';data=parsed}
-    if(!kind)throw new Error('かいもの帖／持ち物台帳のJSON形式ではありません');
-    const next={shopping:kind==='shopping'?data:state.shopping,belongings:kind==='belongings'?data:state.belongings};
-    state=buildIntegrated(next);writeJson(KEYS.integrated,state);renderAll();
-    showToast(kind==='shopping'?'かいもの帖のデータを取り込みました':'持ち物台帳のデータを取り込みました');
-  }catch(e){showToast(`読み込めませんでした：${e.message}`)}
-}
-
-function clearIntegrated(){
-  if(!confirm('統合用コピーを削除しますか？\n元アプリのデータは削除されません。'))return;
-  localStorage.removeItem(KEYS.integrated);state=buildIntegrated({shopping:null,belongings:null});renderAll();showToast('統合用コピーを削除しました');showMigrationIfAvailable();
-}
-
+function showView(name){document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active',v.id===`view-${name}`));document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===name));window.scrollTo({top:0,behavior:'smooth'});$('main').focus({preventScroll:true})}
+function globalSearch(){const q=norm($('global-search').value),box=$('search-results');if(!q){box.hidden=true;box.innerHTML='';return}const results=[];array(state.shopping.shoppingList).forEach(i=>{if(norm([i.productName,i.note].join(' ')).includes(q))results.push({kind:'買うもの',name:i.productName,meta:i.note||''})});array(state.shopping.inventory).forEach(i=>{if(norm([i.productName,i.note].join(' ')).includes(q))results.push({kind:'在庫',name:i.productName,meta:i.confirmedQuantity==null?'数量要確認':`${i.confirmedQuantity}${i.unit||''}`})});array(state.belongings).forEach(i=>{if(norm([i.name,i.location,i.detail].join(' ')).includes(q))results.push({kind:'持ち物',name:i.name,meta:i.location||''})});box.hidden=false;box.innerHTML=results.length?results.slice(0,20).map(r=>`<div class="result-row"><div class="result-kind">${esc(r.kind)}</div><strong>${esc(r.name||'名称未設定')}</strong>${r.meta?`<div class="meta">${esc(r.meta)}</div>`:''}</div>`).join(''):'<div class="empty">見つかりませんでした</div>'}
+function exportIntegrated(){if(!readJson(KEYS.integrated)){showToast('先に統合データを作成してください');return}const blob=new Blob([JSON.stringify(state,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`kurashi-cho-backup-${today()}.json`;a.click();URL.revokeObjectURL(url);showToast('統合データを書き出しました')}
+async function importFile(file){try{const parsed=JSON.parse(await file.text());if(!validIntegrated(parsed))throw new Error('統合版のJSON形式ではありません');state=normalizeState(parsed);persist('統合データを読み込みました')}catch(e){showToast(`読み込めませんでした：${e.message}`)}}
+async function importSourceFile(file){try{const parsed=JSON.parse(await file.text());if(validIntegrated(parsed)){state=normalizeState(parsed);persist('統合版のバックアップを読み込みました');return}let kind=null,data=null;if(Array.isArray(parsed)){kind='belongings';data=parsed}else if(Array.isArray(parsed?.ledger)){kind='belongings';data=parsed.ledger}else if(Array.isArray(parsed?.inventory)&&Array.isArray(parsed?.shoppingList)){kind='shopping';data=parsed}if(!kind)throw new Error('かいもの帖／持ち物台帳のJSON形式ではありません');writeJson(KEYS.backup,state);state=buildIntegrated({shopping:kind==='shopping'?data:state.shopping,belongings:kind==='belongings'?data:state.belongings});persist(kind==='shopping'?'かいもの帖のデータを取り込みました':'持ち物台帳のデータを取り込みました')}catch(e){showToast(`読み込めませんでした：${e.message}`)}}
+function clearIntegrated(){if(!confirm('統合データを削除しますか？\n元アプリのデータは削除されません。'))return;localStorage.removeItem(KEYS.integrated);state=buildIntegrated({shopping:null,belongings:null});renderAll();showToast('統合データを削除しました');showMigrationIfAvailable()}
 function showToast(message){const el=$('toast');clearTimeout(toastTimer);el.textContent=message;el.classList.add('show');toastTimer=setTimeout(()=>el.classList.remove('show'),3200)}
 
-document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>showView(t.dataset.view)));
-document.querySelectorAll('[data-go]').forEach(t=>t.addEventListener('click',()=>showView(t.dataset.go)));
-$('global-search').addEventListener('input',globalSearch);
-$('inventory-search').addEventListener('input',renderInventory);
-$('belongings-search').addEventListener('input',renderBelongings);
-$('belongings-category').addEventListener('change',renderBelongings);
-$('belongings-location').addEventListener('change',renderBelongings);
-$('migration-confirm').addEventListener('click',importSources);
-$('migration-later').addEventListener('click',()=>$('migration-modal').hidden=true);
-$('import-sources-btn').addEventListener('click',()=>{if(readJson(KEYS.integrated)&&!confirm('統合用コピーを元アプリの現在データで更新しますか？'))return;importSources()});
-$('refresh-btn').addEventListener('click',()=>{
-  const source=sourceSnapshot();
-  if(source.shopping||source.belongings){
-    state=buildIntegrated(source);writeJson(KEYS.integrated,state);renderAll();showToast('元アプリの最新データを読み込みました');
-  }else{renderAll();showToast('表示を更新しました')}
-});
-$('export-btn').addEventListener('click',exportIntegrated);
-$('import-source-file-btn').addEventListener('click',()=>$('import-source-file').click());
-$('import-source-file').addEventListener('change',e=>{const file=e.target.files?.[0];if(file)importSourceFile(file);e.target.value=''});
-$('import-btn').addEventListener('click',()=>$('import-file').click());
-$('import-file').addEventListener('change',e=>{const file=e.target.files?.[0];if(file)importFile(file);e.target.value=''});
-$('clear-integrated-btn').addEventListener('click',clearIntegrated);
-
-load();
-if('serviceWorker'in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));
+document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>showView(t.dataset.view)));document.querySelectorAll('[data-go]').forEach(t=>t.addEventListener('click',()=>showView(t.dataset.go)));
+$('global-search').addEventListener('input',globalSearch);$('inventory-search').addEventListener('input',renderInventory);$('belongings-search').addEventListener('input',renderBelongings);$('belongings-category').addEventListener('change',renderBelongings);$('belongings-location').addEventListener('change',renderBelongings);
+$('shopping-list').addEventListener('click',handleListAction);$('inventory-list').addEventListener('click',handleListAction);$('belongings-list').addEventListener('click',handleListAction);
+$('add-shopping-btn').addEventListener('click',addShopping);$('add-inventory-btn').addEventListener('click',()=>openInventoryModal());$('add-belonging-btn').addEventListener('click',()=>openBelongingModal());$('home-add-belonging').addEventListener('click',()=>openBelongingModal());
+$('belonging-cancel').addEventListener('click',closeBelongingModal);$('belonging-save').addEventListener('click',saveBelonging);$('inventory-cancel').addEventListener('click',closeInventoryModal);$('inventory-save').addEventListener('click',saveInventory);
+$('migration-confirm').addEventListener('click',importSources);$('migration-later').addEventListener('click',()=>$('migration-modal').hidden=true);
+$('import-sources-btn').addEventListener('click',()=>{if(readJson(KEYS.integrated)&&!confirm('現在の統合データを元アプリのデータで置き換えますか？\n現在の内容は端末内に自動バックアップします。'))return;importSources()});$('refresh-btn').addEventListener('click',()=>{renderAll();showToast('表示を更新しました')});
+$('export-btn').addEventListener('click',exportIntegrated);$('import-source-file-btn').addEventListener('click',()=>$('import-source-file').click());$('import-source-file').addEventListener('change',e=>{const file=e.target.files?.[0];if(file)importSourceFile(file);e.target.value=''});$('import-btn').addEventListener('click',()=>$('import-file').click());$('import-file').addEventListener('change',e=>{const file=e.target.files?.[0];if(file)importFile(file);e.target.value=''});$('clear-integrated-btn').addEventListener('click',clearIntegrated);
+load();if('serviceWorker'in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));

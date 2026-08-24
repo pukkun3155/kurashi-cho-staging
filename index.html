@@ -51,30 +51,40 @@
         </section>
 
         <section class="card">
-          <div class="section-heading">
-            <div><p class="eyebrow">元のアプリはそのまま</p><h3>登録・編集する</h3></div>
-          </div>
-          <p class="muted">第1段階では、編集は元アプリで行います。編集後にこの画面の↻を押すと読み直せます。</p>
+          <div class="section-heading"><div><p class="eyebrow">くらし帖から直接</p><h3>登録する</h3></div></div>
+          <p class="muted">買うもの・在庫・持ち物を、この統合版から登録・編集できます。</p>
           <div class="action-grid">
-            <a class="action-link" href="https://pukkun3155.github.io/kaimono-memo/">🛒 かいもの帖を開く</a>
-            <a class="action-link" href="https://pukkun3155.github.io/mochimon-dacho/">📦 持ち物台帳を開く</a>
+            <button class="action-link" data-go="shopping">🛒 買うものを追加</button>
+            <button class="action-link" id="home-add-belonging">📦 持ち物を追加</button>
           </div>
         </section>
       </section>
 
       <section id="view-shopping" class="view" aria-labelledby="shopping-title">
         <div class="page-title"><p class="eyebrow">かいもの帖</p><h2 id="shopping-title">🛒 買うもの</h2></div>
+        <section class="card add-card">
+          <h3>買うものを追加</h3>
+          <div class="form-grid">
+            <input id="shopping-name" class="wide" placeholder="商品名" aria-label="商品名">
+            <input id="shopping-qty" type="number" min="0" step="0.1" placeholder="数量" aria-label="数量">
+            <input id="shopping-unit" placeholder="単位" aria-label="単位">
+            <input id="shopping-note" class="wide" placeholder="メモ（任意）" aria-label="メモ">
+          </div>
+          <button id="add-shopping-btn" class="primary-btn">買うものに追加</button>
+        </section>
         <div id="shopping-list" class="list"></div>
       </section>
 
       <section id="view-inventory" class="view" aria-labelledby="inventory-title">
         <div class="page-title"><p class="eyebrow">かいもの帖</p><h2 id="inventory-title">🥫 在庫</h2></div>
+        <button id="add-inventory-btn" class="primary-btn page-action">＋ 在庫を追加</button>
         <label class="search-wrap compact"><span>在庫を検索</span><input id="inventory-search" type="search" placeholder="商品名で検索"></label>
         <div id="inventory-list" class="list"></div>
       </section>
 
       <section id="view-belongings" class="view" aria-labelledby="belongings-title">
         <div class="page-title"><p class="eyebrow">持ち物台帳</p><h2 id="belongings-title">📦 持ち物</h2></div>
+        <button id="add-belonging-btn" class="primary-btn page-action">＋ 持ち物を追加</button>
         <label class="search-wrap compact"><span>持ち物を検索</span><input id="belongings-search" type="search" placeholder="品名・場所・メモで検索"></label>
         <div class="filters">
           <select id="belongings-category" aria-label="カテゴリで絞り込み"><option value="">すべてのカテゴリ</option></select>
@@ -89,7 +99,7 @@
           <h3>統合データ</h3>
           <div id="migration-status" class="status-box"></div>
           <button id="import-sources-btn" class="primary-btn">元アプリから統合用データを作る</button>
-          <p class="notice">元の保存データは削除・変更しません。統合版専用のコピーを作成します。</p>
+          <p class="notice">再取り込みは現在の統合データを上書きします。実行前に自動バックアップを端末内へ残します。</p>
         </section>
         <section class="card">
           <h3>元アプリのJSONから取り込む</h3>
@@ -133,6 +143,33 @@
         <button id="migration-confirm" class="primary-btn">統合用データを作る</button>
       </div>
       <p class="notice">元データはそのまま残り、統合版から削除・変更されません。</p>
+    </div>
+  </div>
+
+  <div id="belonging-modal" class="modal-wrap" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="belonging-modal-title">
+      <h2 id="belonging-modal-title">持ち物を追加</h2>
+      <div class="modal-form">
+        <label>品名<input id="belonging-name"></label>
+        <label>場所<input id="belonging-location" list="location-options" placeholder="例：押し入れ上段"></label>
+        <datalist id="location-options"></datalist>
+        <label>カテゴリ<select id="belonging-category-edit"></select></label>
+        <label>メモ<input id="belonging-detail" placeholder="任意"></label>
+      </div>
+      <div class="modal-actions"><button id="belonging-cancel">キャンセル</button><button id="belonging-save" class="primary-btn">保存</button></div>
+    </div>
+  </div>
+
+  <div id="inventory-modal" class="modal-wrap" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="inventory-modal-title">
+      <h2 id="inventory-modal-title">在庫を追加</h2>
+      <div class="modal-form">
+        <label>商品名<input id="inventory-name-edit"></label>
+        <label>現在の数量<input id="inventory-qty-edit" type="number" min="0" step="0.1"></label>
+        <label>単位<input id="inventory-unit-edit" placeholder="個、本、袋など"></label>
+        <label>メモ<input id="inventory-note-edit" placeholder="任意"></label>
+      </div>
+      <div class="modal-actions"><button id="inventory-cancel">キャンセル</button><button id="inventory-save" class="primary-btn">保存</button></div>
     </div>
   </div>
 
