@@ -109,8 +109,10 @@
         </section>
         <section class="card">
           <h3>バックアップ</h3>
+          <p class="muted">iPhoneでは「共有してファイルに保存」を押し、共有画面から「ファイルに保存」を選んでください。</p>
           <div class="button-stack">
-            <button id="export-btn">統合データをJSONで書き出す</button>
+            <button id="export-btn" class="primary-btn">共有してファイルに保存</button>
+            <button id="copy-json-btn">JSONをコピー</button>
             <button id="import-btn">統合データをJSONから読み込む</button>
             <input id="import-file" type="file" accept="application/json,.json" hidden>
           </div>
@@ -170,6 +172,15 @@
         <label>メモ<input id="inventory-note-edit" placeholder="任意"></label>
       </div>
       <div class="modal-actions"><button id="inventory-cancel">キャンセル</button><button id="inventory-save" class="primary-btn">保存</button></div>
+    </div>
+  </div>
+
+  <div id="json-modal" class="modal-wrap" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="json-modal-title">
+      <h2 id="json-modal-title">バックアップJSON</h2>
+      <p class="muted">コピーできない場合は、下の文字をすべて選択してコピーしてください。</p>
+      <textarea id="json-text" class="json-text" readonly></textarea>
+      <div class="modal-actions"><button id="json-close">閉じる</button><button id="json-copy-again" class="primary-btn">もう一度コピー</button></div>
     </div>
   </div>
 
