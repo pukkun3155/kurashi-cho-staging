@@ -92,6 +92,12 @@
           <p class="notice">元の保存データは削除・変更しません。統合版専用のコピーを作成します。</p>
         </section>
         <section class="card">
+          <h3>元アプリのJSONから取り込む</h3>
+          <p class="muted">自動検出できない場合に使います。かいもの帖または持ち物台帳から書き出したJSONを選んでください。2つは別々に取り込めます。</p>
+          <button id="import-source-file-btn" class="primary-btn">元アプリのJSONを選ぶ</button>
+          <input id="import-source-file" type="file" accept="application/json,.json" hidden>
+        </section>
+        <section class="card">
           <h3>バックアップ</h3>
           <div class="button-stack">
             <button id="export-btn">統合データをJSONで書き出す</button>

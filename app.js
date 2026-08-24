@@ -149,6 +149,23 @@ async function importFile(file){
   try{const parsed=JSON.parse(await file.text());if(!validIntegrated(parsed))throw new Error('統合版のJSON形式ではありません');state=parsed;state.metadata.updatedAt=nowIso();writeJson(KEYS.integrated,state);renderAll();showToast('統合データを読み込みました')}catch(e){showToast(`読み込めませんでした：${e.message}`)}
 }
 
+async function importSourceFile(file){
+  try{
+    const parsed=JSON.parse(await file.text());
+    if(validIntegrated(parsed)){
+      state=parsed;state.metadata.updatedAt=nowIso();writeJson(KEYS.integrated,state);renderAll();showToast('統合版のバックアップを読み込みました');return;
+    }
+    let kind=null,data=null;
+    if(Array.isArray(parsed)){kind='belongings';data=parsed}
+    else if(Array.isArray(parsed?.ledger)){kind='belongings';data=parsed.ledger}
+    else if(Array.isArray(parsed?.inventory)&&Array.isArray(parsed?.shoppingList)){kind='shopping';data=parsed}
+    if(!kind)throw new Error('かいもの帖／持ち物台帳のJSON形式ではありません');
+    const next={shopping:kind==='shopping'?data:state.shopping,belongings:kind==='belongings'?data:state.belongings};
+    state=buildIntegrated(next);writeJson(KEYS.integrated,state);renderAll();
+    showToast(kind==='shopping'?'かいもの帖のデータを取り込みました':'持ち物台帳のデータを取り込みました');
+  }catch(e){showToast(`読み込めませんでした：${e.message}`)}
+}
+
 function clearIntegrated(){
   if(!confirm('統合用コピーを削除しますか？\n元アプリのデータは削除されません。'))return;
   localStorage.removeItem(KEYS.integrated);state=buildIntegrated({shopping:null,belongings:null});renderAll();showToast('統合用コピーを削除しました');showMigrationIfAvailable();
@@ -173,6 +190,8 @@ $('refresh-btn').addEventListener('click',()=>{
   }else{renderAll();showToast('表示を更新しました')}
 });
 $('export-btn').addEventListener('click',exportIntegrated);
+$('import-source-file-btn').addEventListener('click',()=>$('import-source-file').click());
+$('import-source-file').addEventListener('change',e=>{const file=e.target.files?.[0];if(file)importSourceFile(file);e.target.value=''});
 $('import-btn').addEventListener('click',()=>$('import-file').click());
 $('import-file').addEventListener('change',e=>{const file=e.target.files?.[0];if(file)importFile(file);e.target.value=''});
 $('clear-integrated-btn').addEventListener('click',clearIntegrated);
