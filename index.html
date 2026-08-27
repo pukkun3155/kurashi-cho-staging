@@ -80,6 +80,11 @@
           </div>
           <button id="add-shopping-btn" class="primary-btn">買うものに追加</button>
         </section>
+        <label class="search-wrap compact"><span>買うものを検索</span><input id="shopping-search" type="search" placeholder="商品名・メモ・単位で検索"></label>
+        <label class="sort-wrap"><span>並べ替え</span><select id="shopping-sort" aria-label="買うものの並べ替え">
+          <option value="created">登録順</option>
+          <option value="name">名前順</option>
+        </select></label>
         <div id="shopping-list" class="list"></div>
       </section>
 
@@ -87,6 +92,13 @@
         <div class="page-title"><p class="eyebrow">かいもの帖</p><h2 id="inventory-title">🥫 在庫</h2></div>
         <button id="add-inventory-btn" class="primary-btn page-action">＋ 在庫を追加</button>
         <label class="search-wrap compact"><span>在庫を検索</span><input id="inventory-search" type="search" placeholder="商品名で検索"></label>
+        <label class="sort-wrap"><span>並べ替え</span><select id="inventory-sort" aria-label="在庫の並べ替え">
+          <option value="created">登録順</option>
+          <option value="name">名前順</option>
+          <option value="qty-asc">数量の少ない順</option>
+          <option value="qty-desc">数量の多い順</option>
+          <option value="date-desc">最終確認日の新しい順</option>
+        </select></label>
         <div id="inventory-list" class="list"></div>
       </section>
 
@@ -98,6 +110,13 @@
           <select id="belongings-category" aria-label="カテゴリで絞り込み"><option value="">すべてのカテゴリ</option></select>
           <select id="belongings-location" aria-label="場所で絞り込み"><option value="">すべての場所</option></select>
         </div>
+        <label class="sort-wrap"><span>並べ替え</span><select id="belongings-sort" aria-label="持ち物の並べ替え">
+          <option value="created">登録順</option>
+          <option value="name">名前順</option>
+          <option value="location">場所順</option>
+          <option value="category">カテゴリ順</option>
+          <option value="updated-desc">更新日の新しい順</option>
+        </select></label>
         <div id="belongings-list" class="list"></div>
       </section>
 
