@@ -184,7 +184,9 @@
         <datalist id="location-options"></datalist>
         <label>カテゴリ<select id="belonging-category-edit"></select></label>
         <label>メモ<input id="belonging-detail" placeholder="任意"></label>
+        <label>在庫との連携（任意）<select id="belonging-inventory-link"></select></label>
       </div>
+      <p class="notice">在庫商品と連携すると、この持ち物の画面に現在在庫を表示できます（工具・家電など数量管理しないものは連携不要です）。</p>
       <div class="modal-actions"><button id="belonging-cancel">キャンセル</button><button id="belonging-save" class="primary-btn">保存</button></div>
     </div>
   </div>
@@ -199,6 +201,19 @@
         <label>メモ<input id="inventory-note-edit" placeholder="任意"></label>
       </div>
       <div class="modal-actions"><button id="inventory-cancel">キャンセル</button><button id="inventory-save" class="primary-btn">保存</button></div>
+    </div>
+  </div>
+
+  <div id="purchase-qty-modal" class="modal-wrap" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="purchase-qty-title">
+      <h2 id="purchase-qty-title">購入数量を確認</h2>
+      <p><strong id="purchase-qty-name"></strong></p>
+      <p class="muted">予定：<span id="purchase-qty-planned"></span></p>
+      <div class="modal-form">
+        <label>実際に購入した数量<input id="purchase-qty-input" type="number" min="0" step="0.1" placeholder="数量を入力してください"></label>
+      </div>
+      <p class="muted">単位：<span id="purchase-qty-unit-label"></span></p>
+      <div class="modal-actions"><button id="purchase-qty-cancel">キャンセル</button><button id="purchase-qty-confirm" class="primary-btn">次へ</button></div>
     </div>
   </div>
 
