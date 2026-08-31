@@ -121,6 +121,10 @@ function removeShopping(id){state.shopping.shoppingList=state.shopping.shoppingL
 // 在庫への加算処理はここ1か所に集約する。purchaseToInventory()と、
 // 「購入→持ち物」で在庫連携した場合の両方から呼び出し、二重加算を防ぐ。
 function applyInventoryAddition(inventoryId,qty){const item=state.shopping.inventory.find(i=>i.id===inventoryId);if(!item)return;item.confirmedQuantity=(Number(item.confirmedQuantity)||0)+qty;item.lastConfirmedDate=today()}
+// 新規在庫商品を1件だけ作成して返す。呼び出し側でapplyInventoryAddition()を
+// 重ねて呼ばないこと（作成時のconfirmedQuantityがそのまま初期在庫になるため、
+// 追加加算すると二重計上になる）。
+function createInventoryItem(productName,qty,unit){const newId=uid('inv');state.shopping.inventory.push({id:newId,productName,confirmedQuantity:qty,unit:unit||null,lastConfirmedDate:today(),category:'consumable',note:''});return newId}
 function purchaseToInventory(id,qty){const item=state.shopping.shoppingList.find(i=>i.id===id);if(!item)return;const existing=state.shopping.inventory.find(i=>norm(i.productName)===norm(item.productName));if(existing){applyInventoryAddition(existing.id,qty);existing.unit=existing.unit||item.unit||null}else state.shopping.inventory.push({id:uid('inv'),productName:item.productName,confirmedQuantity:qty,unit:item.unit||null,lastConfirmedDate:today(),category:'consumable',note:item.note||'買い物リストから登録'});recordPurchase(item,qty);removeShopping(id);persist(`${item.productName}を在庫へ登録しました`)}
 
 // ---- 購入数量確認（「購入→在庫」「購入→持ち物」共通） ----
@@ -131,14 +135,57 @@ function openPurchaseQtyModal(shoppingId,mode){const item=state.shopping.shoppin
 function closePurchaseQtyModal(){$('purchase-qty-modal').hidden=true;purchaseQtyShoppingId=null;purchaseQtyMode=null}
 function confirmPurchaseQty(){const raw=$('purchase-qty-input').value,qty=Number(raw);if(raw===''||!Number.isFinite(qty)||qty<=0){showToast('実際に購入した数量を入力してください');return}const shoppingId=purchaseQtyShoppingId,mode=purchaseQtyMode;closePurchaseQtyModal();if(mode==='inventory')purchaseToInventory(shoppingId,qty);else if(mode==='belonging'){purchaseQtyConfirmed=qty;openBelongingModal(null,shoppingId)}}
 
+const NEW_STOCK_LINK_VALUE='__new__';
 // 持ち物の在庫連携候補：商品名一致は「候補」として先頭に出すだけで、選択は自動化しない。
-function belongingInventoryOptions(matchName,currentId){const items=array(state.shopping.inventory);const matches=matchName?items.filter(i=>norm(i.productName)===norm(matchName)):[];const others=items.filter(i=>!matches.includes(i)).slice().sort((a,b)=>norm(a.productName).localeCompare(norm(b.productName),'ja'));let html='<option value="">連携しない</option>';html+=matches.map(i=>`<option value="${esc(i.id)}">${esc(i.productName)}（候補・在庫と同名）</option>`).join('');html+=others.map(i=>`<option value="${esc(i.id)}">${esc(i.productName)}</option>`).join('');if(currentId&&!items.some(i=>i.id===currentId))html+=`<option value="${esc(currentId)}">（在庫データが見つかりません）</option>`;return html}
+// 末尾に「新規登録」という特殊な選択肢を追加する（実在のinventory IDではなく、
+// 保存確定時にのみ新規作成をトリガーするための予約値）。
+function belongingInventoryOptions(matchName,currentId){const items=array(state.shopping.inventory);const matches=matchName?items.filter(i=>norm(i.productName)===norm(matchName)):[];const others=items.filter(i=>!matches.includes(i)).slice().sort((a,b)=>norm(a.productName).localeCompare(norm(b.productName),'ja'));let html='<option value="">連携しない</option>';html+=matches.map(i=>`<option value="${esc(i.id)}">${esc(i.productName)}（候補・在庫と同名）</option>`).join('');html+=others.map(i=>`<option value="${esc(i.id)}">${esc(i.productName)}</option>`).join('');if(currentId&&currentId!==NEW_STOCK_LINK_VALUE&&!items.some(i=>i.id===currentId))html+=`<option value="${esc(currentId)}">（在庫データが見つかりません）</option>`;html+=`<option value="${NEW_STOCK_LINK_VALUE}">＋ 新しい在庫商品として登録して連携</option>`;return html}
+// 「新規登録」選択時の入力欄表示を切り替える。購入フロー中（purchaseShoppingIdあり）は
+// 購入数量確認画面で確定済みの実購入数量をそのまま使うため、数量・単位の再入力はさせない
+// （案内文だけ表示）。通常の追加・編集では、数量未入力のまま保存できないよう
+// 入力欄自体を必須表示にする（商品名からの推測は行わない）。
+function updateBelongingNewStockUI(){const isNew=$('belonging-inventory-link').value===NEW_STOCK_LINK_VALUE,isPurchaseFlow=!!purchaseShoppingId,showManualFields=isNew&&!isPurchaseFlow;$('belonging-new-stock-qty-field').hidden=!showManualFields;$('belonging-new-stock-unit-field').hidden=!showManualFields;if(isNew&&isPurchaseFlow){const shop=purchaseShoppingId?state.shopping.shoppingList.find(i=>i.id===purchaseShoppingId):null;$('belonging-new-stock-purchase-note').hidden=false;$('belonging-new-stock-purchase-note').textContent=`実購入数量（${purchaseQtyConfirmed}${shop?.unit||''}）をそのまま在庫として登録します。`}else{$('belonging-new-stock-purchase-note').hidden=true}}
 
-function openBelongingModal(id=null,shoppingId=null){belongingEditId=id;purchaseShoppingId=shoppingId;const item=id?state.belongings.find(i=>i.id===id):null,shop=shoppingId?state.shopping.shoppingList.find(i=>i.id===shoppingId):null;$('belonging-modal-title').textContent=shoppingId?'購入品を持ち物へ登録':id?'持ち物を編集・移動':'持ち物を追加';$('belonging-name').value=item?.name||shop?.productName||'';$('belonging-location').value=item?.location||'';$('belonging-detail').value=item?.detail||shop?.note||'';$('belonging-category-edit').innerHTML=CATEGORIES.map(c=>`<option>${esc(c)}</option>`).join('');$('belonging-category-edit').value=item?.category||'その他';const matchName=item?.name||shop?.productName||'',currentLinkId=item?.inventoryItemId||null;$('belonging-inventory-link').innerHTML=belongingInventoryOptions(matchName,currentLinkId);$('belonging-inventory-link').value=currentLinkId||'';$('belonging-modal').hidden=false;setTimeout(()=>$('belonging-name').focus(),30)}
+function openBelongingModal(id=null,shoppingId=null){belongingEditId=id;purchaseShoppingId=shoppingId;const item=id?state.belongings.find(i=>i.id===id):null,shop=shoppingId?state.shopping.shoppingList.find(i=>i.id===shoppingId):null;$('belonging-modal-title').textContent=shoppingId?'購入品を持ち物へ登録':id?'持ち物を編集・移動':'持ち物を追加';$('belonging-name').value=item?.name||shop?.productName||'';$('belonging-location').value=item?.location||'';$('belonging-detail').value=item?.detail||shop?.note||'';$('belonging-category-edit').innerHTML=CATEGORIES.map(c=>`<option>${esc(c)}</option>`).join('');$('belonging-category-edit').value=item?.category||'その他';const matchName=item?.name||shop?.productName||'',currentLinkId=item?.inventoryItemId||null;$('belonging-inventory-link').innerHTML=belongingInventoryOptions(matchName,currentLinkId);$('belonging-inventory-link').value=currentLinkId||'';$('belonging-new-stock-qty').value='';$('belonging-new-stock-unit').value='';updateBelongingNewStockUI();$('belonging-modal').hidden=false;setTimeout(()=>$('belonging-name').focus(),30)}
 // 在庫連携は商品名一致だけで自動確定しない：セレクトの初期値は常に「連携しない」
 // （既存の持ち物を編集する場合のみ、既に保存済みのinventoryItemIdを初期値にする＝
 // 　編集のたびに既存の連携が勝手に外れることを防ぐ）。
-function saveBelonging(){const name=$('belonging-name').value.trim(),location=$('belonging-location').value.trim();if(!name||!location){showToast('品名と場所を入力してください');return}const wasEdit=!!belongingEditId,linkedInventoryId=$('belonging-inventory-link').value||null,values={name,location,category:$('belonging-category-edit').value,detail:$('belonging-detail').value.trim(),inventoryItemId:linkedInventoryId,updatedAt:today()};if(belongingEditId){const index=state.belongings.findIndex(i=>i.id===belongingEditId);if(index>=0)state.belongings[index]={...state.belongings[index],...values}}else state.belongings.push({id:uid('item'),savedAt:today(),...values});if(purchaseShoppingId){const shop=state.shopping.shoppingList.find(i=>i.id===purchaseShoppingId),qty=Number(purchaseQtyConfirmed);if(shop&&qty>0){if(linkedInventoryId)applyInventoryAddition(linkedInventoryId,qty);recordPurchase(shop,qty);removeShopping(shop.id)}}closeBelongingModal();persist(wasEdit?'持ち物を更新しました':'持ち物を登録しました')}
+//
+// 「新規登録して連携」を選んだ場合、新規在庫作成（confirmedQuantityの初期値設定）と
+// 購入時のapplyInventoryAddition()を同時に行わないこと。作成時の数量がそのまま
+// 初期在庫になるため、その後に加算すると二重計上になる（テストAの二重加算禁止要件）。
+function saveBelonging(){
+  const name=$('belonging-name').value.trim(),location=$('belonging-location').value.trim();
+  if(!name||!location){showToast('品名と場所を入力してください');return}
+  const wasEdit=!!belongingEditId;
+  const linkSelection=$('belonging-inventory-link').value||null;
+  const isNewStock=linkSelection===NEW_STOCK_LINK_VALUE;
+  const isPurchaseFlow=!!purchaseShoppingId;
+  const purchaseShop=isPurchaseFlow?state.shopping.shoppingList.find(i=>i.id===purchaseShoppingId):null;
+  const purchaseQty=Number(purchaseQtyConfirmed);
+  let manualQty=null,manualUnit=null;
+  if(isNewStock&&!isPurchaseFlow){
+    const raw=$('belonging-new-stock-qty').value;
+    manualQty=Number(raw);
+    manualUnit=$('belonging-new-stock-unit').value.trim()||null;
+    if(raw===''||!Number.isFinite(manualQty)||manualQty<0){showToast('現在在庫の数量を入力してください');return}
+  }
+  let finalInventoryId=isNewStock?null:linkSelection;
+  if(isNewStock){
+    if(isPurchaseFlow&&purchaseShop&&purchaseQty>0)finalInventoryId=createInventoryItem(name,purchaseQty,purchaseShop.unit||null);
+    else if(!isPurchaseFlow)finalInventoryId=createInventoryItem(name,manualQty,manualUnit);
+  }
+  const values={name,location,category:$('belonging-category-edit').value,detail:$('belonging-detail').value.trim(),inventoryItemId:finalInventoryId,updatedAt:today()};
+  if(belongingEditId){const index=state.belongings.findIndex(i=>i.id===belongingEditId);if(index>=0)state.belongings[index]={...state.belongings[index],...values}}
+  else state.belongings.push({id:uid('item'),savedAt:today(),...values});
+  if(isPurchaseFlow&&purchaseShop&&purchaseQty>0){
+    if(!isNewStock&&finalInventoryId)applyInventoryAddition(finalInventoryId,purchaseQty);
+    recordPurchase(purchaseShop,purchaseQty);
+    removeShopping(purchaseShop.id);
+  }
+  closeBelongingModal();
+  persist(wasEdit?'持ち物を更新しました':'持ち物を登録しました');
+}
 function closeBelongingModal(){$('belonging-modal').hidden=true;belongingEditId=null;purchaseShoppingId=null;purchaseQtyConfirmed=null}
 function openInventoryModal(id=null){inventoryEditId=id;const item=id?state.shopping.inventory.find(i=>i.id===id):null;$('inventory-modal-title').textContent=id?'在庫を編集':'在庫を追加';$('inventory-name-edit').value=item?.productName||'';$('inventory-qty-edit').value=item?.confirmedQuantity??'';$('inventory-unit-edit').value=item?.unit||'';$('inventory-note-edit').value=item?.note||'';$('inventory-modal').hidden=false;setTimeout(()=>$('inventory-name-edit').focus(),30)}
 function saveInventory(){const name=$('inventory-name-edit').value.trim(),raw=$('inventory-qty-edit').value,qty=Number(raw),wasEdit=!!inventoryEditId;if(!name||raw===''||!Number.isFinite(qty)||qty<0){showToast('商品名と0以上の数量を入力してください');return}const values={productName:name,confirmedQuantity:qty,unit:$('inventory-unit-edit').value.trim()||null,note:$('inventory-note-edit').value.trim()||null,lastConfirmedDate:today()};let savedId=inventoryEditId;if(inventoryEditId){const index=state.shopping.inventory.findIndex(i=>i.id===inventoryEditId);if(index>=0)state.shopping.inventory[index]={...state.shopping.inventory[index],...values}}else{savedId=uid('inv');state.shopping.inventory.push({id:savedId,category:'consumable',...values})}closeInventoryModal();persist(wasEdit?'在庫を更新しました':'在庫を追加しました');maybePromptAddToShopping(state.shopping.inventory.find(i=>i.id===savedId))}
@@ -169,7 +216,7 @@ document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>show
 $('global-search').addEventListener('input',globalSearch);$('shopping-search').addEventListener('input',renderShopping);$('shopping-sort').addEventListener('change',renderShopping);$('inventory-search').addEventListener('input',renderInventory);$('inventory-sort').addEventListener('change',renderInventory);$('belongings-search').addEventListener('input',renderBelongings);$('belongings-category').addEventListener('change',renderBelongings);$('belongings-location').addEventListener('change',renderBelongings);$('belongings-sort').addEventListener('change',renderBelongings);
 $('shopping-list').addEventListener('click',handleListAction);$('inventory-list').addEventListener('click',handleListAction);$('belongings-list').addEventListener('click',handleListAction);$('stock-check-list').addEventListener('click',handleListAction);
 $('add-shopping-btn').addEventListener('click',addShopping);$('add-inventory-btn').addEventListener('click',()=>openInventoryModal());$('add-belonging-btn').addEventListener('click',()=>openBelongingModal());$('home-add-belonging').addEventListener('click',()=>openBelongingModal());
-$('belonging-cancel').addEventListener('click',closeBelongingModal);$('belonging-save').addEventListener('click',saveBelonging);$('inventory-cancel').addEventListener('click',closeInventoryModal);$('inventory-save').addEventListener('click',saveInventory);$('stock-prompt-skip').addEventListener('click',closeStockPrompt);$('stock-prompt-add').addEventListener('click',confirmStockPromptAdd);$('purchase-qty-cancel').addEventListener('click',closePurchaseQtyModal);$('purchase-qty-confirm').addEventListener('click',confirmPurchaseQty);
+$('belonging-cancel').addEventListener('click',closeBelongingModal);$('belonging-save').addEventListener('click',saveBelonging);$('belonging-inventory-link').addEventListener('change',updateBelongingNewStockUI);$('inventory-cancel').addEventListener('click',closeInventoryModal);$('inventory-save').addEventListener('click',saveInventory);$('stock-prompt-skip').addEventListener('click',closeStockPrompt);$('stock-prompt-add').addEventListener('click',confirmStockPromptAdd);$('purchase-qty-cancel').addEventListener('click',closePurchaseQtyModal);$('purchase-qty-confirm').addEventListener('click',confirmPurchaseQty);
 $('migration-confirm').addEventListener('click',importSources);$('migration-later').addEventListener('click',()=>$('migration-modal').hidden=true);
 $('import-sources-btn').addEventListener('click',()=>{if(readJson(KEYS.integrated)&&!confirm('現在の統合データを元アプリのデータで置き換えますか？\n現在の内容は端末内に自動バックアップします。'))return;importSources()});$('refresh-btn').addEventListener('click',()=>{renderAll();showToast('表示を更新しました')});
 $('export-btn').addEventListener('click',exportIntegrated);$('copy-json-btn').addEventListener('click',copyJson);$('json-close').addEventListener('click',()=>$('json-modal').hidden=true);$('json-copy-again').addEventListener('click',copyJson);$('import-source-file-btn').addEventListener('click',()=>$('import-source-file').click());$('import-source-file').addEventListener('change',e=>{const file=e.target.files?.[0];if(file)importSourceFile(file);e.target.value=''});$('import-btn').addEventListener('click',()=>$('import-file').click());$('import-file').addEventListener('change',e=>{const file=e.target.files?.[0];if(file)importFile(file);e.target.value=''});$('clear-integrated-btn').addEventListener('click',clearIntegrated);
