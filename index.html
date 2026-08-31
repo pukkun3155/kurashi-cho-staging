@@ -185,7 +185,10 @@
         <label>カテゴリ<select id="belonging-category-edit"></select></label>
         <label>メモ<input id="belonging-detail" placeholder="任意"></label>
         <label>在庫との連携（任意）<select id="belonging-inventory-link"></select></label>
+        <label id="belonging-new-stock-qty-field" hidden>現在在庫<input id="belonging-new-stock-qty" type="number" min="0" step="0.1" placeholder="数量を入力してください"></label>
+        <label id="belonging-new-stock-unit-field" hidden>単位<input id="belonging-new-stock-unit" placeholder="個、本、箱など"></label>
       </div>
+      <p id="belonging-new-stock-purchase-note" class="muted" hidden></p>
       <p class="notice">在庫商品と連携すると、この持ち物の画面に現在在庫を表示できます（工具・家電など数量管理しないものは連携不要です）。</p>
       <div class="modal-actions"><button id="belonging-cancel">キャンセル</button><button id="belonging-save" class="primary-btn">保存</button></div>
     </div>
