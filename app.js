@@ -314,25 +314,22 @@ async function syncToSheets(){
   };
   const btn=$('sheets-sync-btn'),statusEl=$('sheets-sync-status');
   btn.disabled=true;
-  statusEl.textContent='同期中…';
+  statusEl.textContent='送信中…';
   try{
-    // Content-Typeを明示するとGAS Web Appへのブラウザ直POSTでプリフライト(OPTIONS)が
-    // 発生し失敗するため、あえてヘッダーを指定しない（ブラウザ既定のtext/plainで送る。
-    // GAS側はe.postData.contentsを生文字列として受け取りJSON.parseするため問題ない）。
-    const res=await fetch(url,{method:'POST',body:JSON.stringify(payload)});
-    const text=await res.text();
-    let data;
-    try{data=JSON.parse(text)}catch{throw new Error('応答がJSON形式ではありません（Web Appのデプロイ設定をご確認ください）')}
-    if(data.ok){
-      statusEl.textContent=`同期しました（${new Date().toLocaleString('ja-JP')}）`;
-      showToast('Google Sheetsへ同期しました');
-    }else{
-      statusEl.textContent=`同期に失敗しました：${data.error||'不明なエラー'}`;
-      showToast('同期に失敗しました');
-    }
+    // 実機のGAS Web App環境ではCORSプリフライトの制約でfetch自体が失敗する
+    // （"Failed to fetch"）ケースが確認されたため、mode:'no-cors'で送信する。
+    // no-corsはレスポンス本文・ステータスを一切読めない「不透明応答」になるため、
+    // GAS側のok/errorを判定する成功判定は行わない（できない）。ここで判定できるのは
+    // 「リクエストを送信できたか（通信そのものが例外を投げなかったか）」だけであり、
+    // 実際にGAS側で正常処理されたかはユーザーがGoogle Sheets側を見て確認する。
+    // Content-Typeは既存どおり明示しない（プリフライト回避、GAS側はe.postData.contents
+    // を生文字列として受け取りJSON.parseするため問題ない）。
+    await fetch(url,{method:'POST',mode:'no-cors',body:JSON.stringify(payload)});
+    statusEl.textContent=`同期要求を送信しました（${new Date().toLocaleString('ja-JP')}）。Google Sheetsで結果を確認してください。`;
+    showToast('同期要求を送信しました。Google Sheetsで結果を確認してください');
   }catch(e){
-    statusEl.textContent=`同期に失敗しました：${e.message}`;
-    showToast('同期に失敗しました（通信エラー）');
+    statusEl.textContent=`送信できませんでした：${e.message}`;
+    showToast('送信できませんでした（通信エラー）');
   }finally{
     btn.disabled=false;
   }
