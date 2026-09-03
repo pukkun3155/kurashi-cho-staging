@@ -25,9 +25,13 @@ function buildIntegrated(source){return normalizeState({metadata:{schemaVersion:
 function validIntegrated(value){return!!value&&typeof value==='object'&&!Array.isArray(value)&&value.shopping&&Array.isArray(value.belongings)}
 function counts(data){return{shopping:array(data?.shopping?.shoppingList).length,inventory:array(data?.shopping?.inventory).length,belongings:array(data?.belongings).length}}
 function persist(message){state.metadata={...(state.metadata||{}),schemaVersion:VERSION,mode:'integrated-editing',updatedAt:nowIso()};writeJson(KEYS.integrated,state);renderAll();if(message)showToast(message)}
-// 起動時、自動同期が有効かつ前回終了時に未送信の変更が残っていた場合は、
-// markSheetsDirty()と同じ経路（3秒デバウンス後に1回送信）に乗せて送り直す。
-function load(){const saved=readJson(KEYS.integrated);state=validIntegrated(saved)?normalizeState(saved):buildIntegrated({shopping:null,belongings:null});renderAll();loadSheetsSyncConfig();loadSheetsAutoSyncConfig();if(isSheetsAutoSyncEnabled()&&isSheetsDirty())markSheetsDirty();if(!validIntegrated(saved))showMigrationIfAvailable()}
+// 起動時は、自動同期が有効かつURL設定済みであれば、前回終了時のdirty有無に
+// かかわらず必ず現在の4データを1回送り直す（no-corsではGAS側の書き込み成否を
+// アプリ側から確認できないため、「未送信の疑いがあるかどうか」で判断せず、
+// 起動のたびに現在状態を送っておく方が安全という方針）。
+// markSheetsDirty()と同じ経路（3秒デバウンス経由）にそのまま乗せる。URL未設定の
+// 場合はmarkSheetsDirty()内部のガードで何も起きない。
+function load(){const saved=readJson(KEYS.integrated);state=validIntegrated(saved)?normalizeState(saved):buildIntegrated({shopping:null,belongings:null});renderAll();loadSheetsSyncConfig();loadSheetsAutoSyncConfig();if(isSheetsAutoSyncEnabled())markSheetsDirty();if(!validIntegrated(saved))showMigrationIfAvailable()}
 function showMigrationIfAvailable(){const source=sourceSnapshot();if(!source.shopping&&!source.belongings)return;const c=counts(source);$('detected-counts').innerHTML=`買うもの <strong>${c.shopping}件</strong><br>在庫 <strong>${c.inventory}件</strong><br>持ち物 <strong>${c.belongings}件</strong>`;$('migration-modal').hidden=false}
 function importSources(){const source=sourceSnapshot();if(!source.shopping&&!source.belongings){showToast('この端末に元アプリのデータが見つかりません');return}if(readJson(KEYS.integrated))writeJson(KEYS.backup,state);state=buildIntegrated(source);writeJson(KEYS.integrated,state);$('migration-modal').hidden=true;renderAll();const c=counts(state);showToast(`取り込みました（合計${c.shopping+c.inventory+c.belongings}件）`)}
 
@@ -310,7 +314,7 @@ function saveSheetsSyncConfig(){
 }
 
 // ---- Google Sheets自動同期（手動同期はそのまま残し、追加のトリガーとして提供） ----
-// ON/OFF・未送信フラグ・最終送信日時は、URL/トークンと同様にkurashi-cho-v1とは
+// ON/OFF・未送信フラグ・最終送信試行日時は、URL/トークンと同様にkurashi-cho-v1とは
 // 別のlocalStorageキーに保存する（JSONバックアップに含めない）。
 const SHEETS_AUTO_SYNC_KEY='kurashi-cho-sheets-auto-sync';
 const SHEETS_DIRTY_KEY='kurashi-cho-sheets-dirty';
@@ -321,7 +325,7 @@ const isSheetsAutoSyncEnabled=()=>localStorage.getItem(SHEETS_AUTO_SYNC_KEY)==='
 const isSheetsDirty=()=>localStorage.getItem(SHEETS_DIRTY_KEY)==='1';
 const getSheetsLastSentAt=()=>localStorage.getItem(SHEETS_LAST_SENT_AT_KEY)||'';
 function clearSheetsDirty(){localStorage.removeItem(SHEETS_DIRTY_KEY)}
-function renderSheetsLastSentAt(){const iso=getSheetsLastSentAt();$('sheets-last-sent-at').textContent=iso?new Date(iso).toLocaleString('ja-JP'):'まだ送信していません'}
+function renderSheetsLastSentAt(){const iso=getSheetsLastSentAt();$('sheets-last-sent-at').textContent=iso?new Date(iso).toLocaleString('ja-JP'):'まだ送信を試みていません'}
 function loadSheetsAutoSyncConfig(){$('sheets-auto-sync-toggle').checked=isSheetsAutoSyncEnabled();renderSheetsLastSentAt()}
 function toggleSheetsAutoSync(){localStorage.setItem(SHEETS_AUTO_SYNC_KEY,$('sheets-auto-sync-toggle').checked?'1':'0')}
 // 在庫・購入履歴・消費履歴・使用ペースのいずれかが変わった直後にだけ呼ぶ
@@ -351,7 +355,7 @@ async function syncToSheets(){
   };
   const btn=$('sheets-sync-btn'),statusEl=$('sheets-sync-status');
   btn.disabled=true;
-  statusEl.textContent='送信中…';
+  statusEl.textContent='送信を試みています…';
   try{
     // 実機のGAS Web App環境ではCORSプリフライトの制約でfetch自体が失敗する
     // （"Failed to fetch"）ケースが確認されたため、mode:'no-cors'で送信する。
@@ -359,14 +363,15 @@ async function syncToSheets(){
     // GAS側のok/errorを判定する成功判定は行わない（できない）。ここで判定できるのは
     // 「リクエストを送信できたか（通信そのものが例外を投げなかったか）」だけであり、
     // 実際にGAS側で正常処理されたかはユーザーがGoogle Sheets側を見て確認する。
+    // fetch()がresolveした事実を「同期成功」とは表現しない（表示文言・変数名とも）。
     // Content-Typeは既存どおり明示しない（プリフライト回避、GAS側はe.postData.contents
     // を生文字列として受け取りJSON.parseするため問題ない）。
     await fetch(url,{method:'POST',mode:'no-cors',body:JSON.stringify(payload)});
     const sentAt=new Date();
-    statusEl.textContent=`同期要求を送信しました（${sentAt.toLocaleString('ja-JP')}）。Google Sheetsで結果を確認してください。`;
-    showToast('同期要求を送信しました。Google Sheetsで結果を確認してください');
-    // no-corsのため「GAS側で正常処理された」ことの断定はできない。ここでクリアするのは
-    // あくまで「ブラウザから送信できた（例外が出なかった）」という事実のみ。手動同期でも
+    statusEl.textContent=`送信を試みました（${sentAt.toLocaleString('ja-JP')}）。Google Sheetsで結果を確認してください。`;
+    showToast('送信を試みました。Google Sheetsで結果を確認してください');
+    // no-corsのため「GAS側で正常処理された」ことの断定はできない。ここで記録するのは
+    // あくまで「ブラウザから送信を試みた（例外が出なかった）」という事実のみ。手動同期でも
     // 同じ制約なので、両者を区別せず同じ基準で未送信フラグを扱う。
     localStorage.setItem(SHEETS_LAST_SENT_AT_KEY,sentAt.toISOString());
     clearSheetsDirty();
