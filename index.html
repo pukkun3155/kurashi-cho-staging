@@ -144,6 +144,19 @@
             <input id="import-file" type="file" accept="application/json,.json" hidden>
           </div>
         </section>
+        <section class="card">
+          <h3>Google Sheets同期</h3>
+          <p class="muted">在庫・購入履歴・消費履歴・使用ペースを、指定したGoogle Apps Script Web AppのURLへ送信します。自動同期はせず、ボタンを押した時だけ送信します。URL・トークンはこの端末内にのみ保存され、JSONバックアップには含まれません。</p>
+          <div class="modal-form">
+            <label>Web App URL<input id="sheets-sync-url-input" placeholder="https://script.google.com/macros/s/.../exec"></label>
+            <label>同期トークン（任意）<input id="sheets-sync-token-input" placeholder="GAS側で設定した場合のみ入力"></label>
+          </div>
+          <div class="button-stack">
+            <button id="sheets-sync-config-save">設定を保存</button>
+            <button id="sheets-sync-btn" class="primary-btn">Sheetsへ同期</button>
+          </div>
+          <p id="sheets-sync-status" class="muted"></p>
+        </section>
         <section class="card danger-zone">
           <h3>統合用コピーだけを削除</h3>
           <p class="muted">かいもの帖と持ち物台帳の元データには影響しません。</p>
