@@ -95,6 +95,56 @@ function stockoutPrediction(forecast){
   if(forecast.daysLeft<=7)return{category:'amber',icon:'🟠',label:'7日以内に在庫切れ見込み'};
   return{category:'green',icon:'🟢',label:'当面余裕あり'};
 }
+
+// ---- 在庫切れ確率（第2フェーズ：既存の🔴🟠🟢⚪判定を置き換えない、あくまで補足表示） ----
+// consumptionLog[]をinventoryIdごとに日別集計する。消費記録のない日も0個消費として
+// 必ず系列に含める（イベントが起きた日だけで平均を取らない）。観測期間は
+// 「最古の対象消費履歴日〜今日」だが、最大30日に制限する。
+const PROBABILITY_SERIES_MAX_DAYS=30;
+const PROBABILITY_HORIZON_DAYS=3;
+const PROBABILITY_MIN_OBSERVATION_DAYS=7;
+const PROBABILITY_MIN_LOG_COUNT=3;
+function buildDailyConsumptionSeries(inventoryId){
+  const logs=array(state.shopping.consumptionLog).filter(l=>l.inventoryId===inventoryId);
+  if(logs.length===0)return null;
+  const earliestDate=logs.reduce((min,l)=>l.date<min?l.date:min,logs[0].date);
+  const daysSinceEarliest=daysBetween(earliestDate,today());
+  if(daysSinceEarliest==null)return null;
+  const observationDays=Math.min(daysSinceEarliest+1,PROBABILITY_SERIES_MAX_DAYS);
+  const totalByDate={};
+  logs.forEach(l=>{totalByDate[l.date]=(totalByDate[l.date]||0)+(Number(l.quantity)||0)});
+  const series=[];
+  for(let d=observationDays-1;d>=0;d--)series.push(totalByDate[dateOffset(d)]||0);
+  return{series,observationDays,logCount:logs.length};
+}
+// 経験的ブートストラップ（復元抽出でhorizonDays日分をサンプリングし、合計消費が
+// 現在在庫以上になる割合）の厳密解。乱数は一切使わず、観測日数n・horizonDays=3の
+// 全組み合わせ(最大n^3=27,000通り、n<=30のため)を直接数え上げる。そのため
+// 再描画しても確率は揺れない（Monte Carloではない）。
+// 「現在在庫」は既存forecastFor()が返すestimateをそのまま使い、ここで
+// consumptionLogを在庫から再度差し引くことはしない（二重計上防止）。
+function stockoutProbability(forecast,dailySeriesInfo,horizonDays=PROBABILITY_HORIZON_DAYS){
+  if(!dailySeriesInfo)return{available:false,reason:'no-log',observationDays:0};
+  const{series,observationDays,logCount}=dailySeriesInfo;
+  if(observationDays<PROBABILITY_MIN_OBSERVATION_DAYS||logCount<PROBABILITY_MIN_LOG_COUNT||series.length===0){
+    return{available:false,reason:'insufficient-data',observationDays};
+  }
+  const threshold=Math.max(0,forecast.estimate??0);
+  const n=series.length;
+  let stockoutCount=0;
+  const total=Math.pow(n,horizonDays);
+  (function recurse(depth,sum){
+    if(depth===horizonDays){if(sum>=threshold)stockoutCount++;return}
+    for(let i=0;i<n;i++)recurse(depth+1,sum+series[i]);
+  })(0,0);
+  return{available:true,probability:stockoutCount/total,observationDays};
+}
+function stockoutProbabilityLine(item,forecast){
+  if(forecast.status==='unknown')return'';
+  const result=stockoutProbability(forecast,buildDailyConsumptionSeries(item.id));
+  if(!result.available)return`<span>確率予測：データ蓄積中（観測${esc(result.observationDays)}日）</span>`;
+  return`<span>${PROBABILITY_HORIZON_DAYS}日以内に在庫が尽きる確率：${esc(Math.round(result.probability*100))}%</span>`;
+}
 function forecastCardHtml(item,forecast,prediction){
   let metaHtml;
   if(forecast.status==='unknown'){
@@ -105,7 +155,7 @@ function forecastCardHtml(item,forecast,prediction){
     const roundedEstimate=Math.round((forecast.estimate??0)*10)/10;
     const roundedDaysLeft=Math.round((forecast.daysLeft??0)*10)/10;
     const rateText=forecast.rate?`${forecast.rate.quantityPerDay}${forecast.rate.unit||item.unit||''}/日`:'';
-    metaHtml=`<span>確定 ${esc(item.confirmedQuantity)}${esc(item.unit||'')}（${esc(item.lastConfirmedDate)}確認）</span><span>推定在庫 約${esc(roundedEstimate)}${esc(item.unit||'')}</span>${rateText?`<span>使用ペース ${esc(rateText)}</span>`:''}<span>残り 約${esc(roundedDaysLeft)}日</span>`;
+    metaHtml=`<span>確定 ${esc(item.confirmedQuantity)}${esc(item.unit||'')}（${esc(item.lastConfirmedDate)}確認）</span><span>推定在庫 約${esc(roundedEstimate)}${esc(item.unit||'')}</span>${rateText?`<span>使用ペース ${esc(rateText)}</span>`:''}<span>残り 約${esc(roundedDaysLeft)}日</span>${stockoutProbabilityLine(item,forecast)}`;
   }
   return`<article class="list-card forecast-card forecast-${prediction.category}"><h3>${esc(item.productName||'名称未設定')}</h3><div class="forecast-badge">${prediction.icon} ${esc(prediction.label)}</div><div class="meta">${metaHtml}</div><div class="item-actions"><button class="primary-small" data-action="check-stock" data-id="${esc(item.id)}">在庫を確認</button>${homeAddToShoppingButtonHtml(item,forecast)}</div></article>`;
 }
