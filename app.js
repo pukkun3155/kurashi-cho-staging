@@ -81,10 +81,21 @@ function forecastFor(item){
   else if(daysLeft<=th.buyForSafety.daysUntilEmptyMax||(FORECAST_STALE_JUDGEMENT_ENABLED&&elapsed>=FORECAST_STALE_DAYS))status='amber';
   return{status,estimate,daysLeft,elapsed,purchased,rate,confirmedQuantity:item.confirmedQuantity,lastConfirmedDate:item.lastConfirmedDate};
 }
-function forecastStatusMeta(status){return{red:{icon:'🔴',label:'確認してください'},amber:{icon:'🟠',label:'そろそろ確認'},unknown:{icon:'⚪',label:'一度在庫を確認'}}[status]||{icon:'',label:''}}
 function eligibleForecastItems(){return array(state.shopping.inventory).filter(i=>!FORECAST_EXCLUDED_CATEGORIES.includes(i.category))}
-function forecastCardHtml(item,forecast){
-  const meta=forecastStatusMeta(forecast.status);
+// ---- 在庫切れ予測（表示区分。購入提案のしきい値=forecast.statusとは完全に別物） ----
+// 「在庫切れ予測」バッジはdaysLeftだけで決める。forecastFor()自体・
+// restockAtRemainingUses.max等の既存しきい値ロジックは一切変更しない
+// （「買うものに追加」ボタンの表示可否は引き続きforecast.statusを見る＝下のhomeAddToShoppingButtonHtml参照）。
+// 次フェーズでconsumptionLog[]の日別消費系列から「3日以内に切れる確率」を出す予定があるため、
+// この関数はforecastFor()の計算結果(daysLeft等)だけを受け取る純粋関数にしてある。将来、
+// 中身を確率ベースの判定に差し替えてもforecastFor()側や呼び出し側のシグネチャは変えずに済む。
+function stockoutPrediction(forecast){
+  if(forecast.status==='unknown')return{category:'unknown',icon:'⚪',label:'予測データ不足'};
+  if(forecast.daysLeft<=3)return{category:'red',icon:'🔴',label:'3日以内に在庫切れ見込み'};
+  if(forecast.daysLeft<=7)return{category:'amber',icon:'🟠',label:'7日以内に在庫切れ見込み'};
+  return{category:'green',icon:'🟢',label:'当面余裕あり'};
+}
+function forecastCardHtml(item,forecast,prediction){
   let metaHtml;
   if(forecast.status==='unknown'){
     metaHtml=forecast.reason==='no-baseline'
@@ -92,10 +103,11 @@ function forecastCardHtml(item,forecast){
       :`<span>確定 ${esc(item.confirmedQuantity)}${esc(item.unit||'')}${item.lastConfirmedDate?`（${esc(item.lastConfirmedDate)}確認）`:''}</span><span>使用ペース未設定</span>`;
   }else{
     const roundedEstimate=Math.round((forecast.estimate??0)*10)/10;
+    const roundedDaysLeft=Math.round((forecast.daysLeft??0)*10)/10;
     const rateText=forecast.rate?`${forecast.rate.quantityPerDay}${forecast.rate.unit||item.unit||''}/日`:'';
-    metaHtml=`<span>確定 ${esc(item.confirmedQuantity)}${esc(item.unit||'')}（${esc(item.lastConfirmedDate)}確認）</span><span>予測 約${esc(roundedEstimate)}${esc(item.unit||'')}</span>${rateText?`<span>使用ペース ${esc(rateText)}</span>`:''}`;
+    metaHtml=`<span>確定 ${esc(item.confirmedQuantity)}${esc(item.unit||'')}（${esc(item.lastConfirmedDate)}確認）</span><span>推定在庫 約${esc(roundedEstimate)}${esc(item.unit||'')}</span>${rateText?`<span>使用ペース ${esc(rateText)}</span>`:''}<span>残り 約${esc(roundedDaysLeft)}日</span>`;
   }
-  return`<article class="list-card forecast-card forecast-${forecast.status}"><h3>${esc(item.productName||'名称未設定')}</h3><div class="forecast-badge">${meta.icon} ${esc(meta.label)}</div><div class="meta">${metaHtml}</div><div class="item-actions"><button class="primary-small" data-action="check-stock" data-id="${esc(item.id)}">在庫を確認</button>${homeAddToShoppingButtonHtml(item,forecast)}</div></article>`;
+  return`<article class="list-card forecast-card forecast-${prediction.category}"><h3>${esc(item.productName||'名称未設定')}</h3><div class="forecast-badge">${prediction.icon} ${esc(prediction.label)}</div><div class="meta">${metaHtml}</div><div class="item-actions"><button class="primary-small" data-action="check-stock" data-id="${esc(item.id)}">在庫を確認</button>${homeAddToShoppingButtonHtml(item,forecast)}</div></article>`;
 }
 // 🔴🟠のみ「買うものに追加」を出す（⚪は在庫状況が未確定で購入要否を判断できないため）。
 // すでに買うものリストに同名商品があれば、ボタンではなく登録済み表示にする
@@ -106,17 +118,18 @@ function homeAddToShoppingButtonHtml(item,forecast){
   if(alreadyInList)return'<span class="pill">✓ 買うものに登録済み</span>';
   return`<button data-action="add-to-shopping-from-home" data-id="${esc(item.id)}">買うものに追加</button>`;
 }
-// 優先順位 red > amber > unknown。unknownで画面が埋まらないよう、red/amberを入れてから
-// 残り枠だけをunknownで埋める（合計はFORECAST_HOME_LIMIT件まで）。
+// 優先順位 red > amber > unknown > green（新しい在庫切れ予測区分）。件数が多い場合は
+// 表示上限(FORECAST_HOME_LIMIT)を維持したまま、優先度の高いものから順に埋める。
+// 「余裕あり(green)」も今回から表示対象に含める（従来はok相当の商品を一切表示しなかった
+// が、「在庫切れ予測」として正式化するにあたり、優先度は下げつつも一覧には含める）。
 function renderStockCheck(){
-  const groups={red:[],amber:[],unknown:[]};
-  eligibleForecastItems().forEach(item=>{const forecast=forecastFor(item);if(groups[forecast.status])groups[forecast.status].push({item,forecast})});
+  const groups={red:[],amber:[],unknown:[],green:[]};
+  eligibleForecastItems().forEach(item=>{const forecast=forecastFor(item);const prediction=stockoutPrediction(forecast);groups[prediction.category].push({item,forecast,prediction})});
   const byEstimateAsc=(a,b)=>(a.forecast.estimate??0)-(b.forecast.estimate??0);
-  groups.red.sort(byEstimateAsc);groups.amber.sort(byEstimateAsc);
-  const redAndAmber=[...groups.red,...groups.amber];
-  const remaining=Math.max(0,FORECAST_HOME_LIMIT-redAndAmber.length);
-  const top=[...redAndAmber,...groups.unknown.slice(0,remaining)].slice(0,FORECAST_HOME_LIMIT);
-  $('stock-check-list').innerHTML=top.length?top.map(({item,forecast})=>forecastCardHtml(item,forecast)).join(''):'<div class="empty">確認が必要な在庫は見当たりません</div>'}
+  const byDaysLeftAsc=(a,b)=>(a.forecast.daysLeft??Infinity)-(b.forecast.daysLeft??Infinity);
+  groups.red.sort(byEstimateAsc);groups.amber.sort(byEstimateAsc);groups.green.sort(byDaysLeftAsc);
+  const top=[...groups.red,...groups.amber,...groups.unknown,...groups.green].slice(0,FORECAST_HOME_LIMIT);
+  $('stock-check-list').innerHTML=top.length?top.map(({item,forecast,prediction})=>forecastCardHtml(item,forecast,prediction)).join(''):'<div class="empty">確認が必要な在庫は見当たりません</div>'}
 
 function renderAll(){const c=counts(state);$('shopping-count').textContent=c.shopping;$('inventory-count').textContent=c.inventory;$('belongings-count').textContent=c.belongings;const integrated=!!readJson(KEYS.integrated);$('sync-badge').textContent=integrated?'利用中':'未統合';$('sync-badge').classList.toggle('ok',integrated);renderStockCheck();renderToday();renderShopping();renderInventory();renderBelongingFilters();renderBelongings();renderSettings()}
 function renderToday(){const shopping=array(state.shopping.shoppingList).slice(0,5),unknown=array(state.shopping.inventory).filter(i=>i.confirmedQuantity==null).slice(0,3);const rows=[...shopping.map(i=>({label:i.productName||'名称未設定',meta:`買うもの${i.plannedQuantity!=null?`・${i.plannedQuantity}${i.unit||''}`:''}`})),...unknown.map(i=>({label:i.productName||'名称未設定',meta:'在庫数を確認'}))];$('today-summary').innerHTML=rows.length?rows.map(r=>`<div class="summary-row"><strong>${esc(r.label)}</strong><span>${esc(r.meta)}</span></div>`).join(''):'<div class="empty">今日確認する候補はありません</div>'}
@@ -280,7 +293,7 @@ function confirmHomeAddShopping(){
   if(raw===''||!Number.isFinite(qty)||qty<=0){showToast('購入予定数量を入力してください');return}
   if(state.shopping.shoppingList.some(s=>norm(s.productName)===norm(item.productName))){showToast('すでに買うものリストに登録されています');closeHomeAddShoppingModal();renderAll();return}
   const unit=$('home-add-shopping-unit').value.trim()||null;
-  state.shopping.shoppingList.push({id:uid('shop'),productName:item.productName,plannedQuantity:qty,unit,status:'未購入',note:'在庫チェックから追加',createdAt:nowIso()});
+  state.shopping.shoppingList.push({id:uid('shop'),productName:item.productName,plannedQuantity:qty,unit,status:'未購入',note:'在庫切れ予測から追加',createdAt:nowIso()});
   closeHomeAddShoppingModal();
   persist('買うものに追加しました');
 }
