@@ -146,7 +146,7 @@
         </section>
         <section class="card">
           <h3>Google Sheets同期</h3>
-          <p class="muted">在庫・購入履歴・消費履歴・使用ペースを、指定したGoogle Apps Script Web AppのURLへ送信します。自動同期はせず、ボタンを押した時だけ送信します。URL・トークンはこの端末内にのみ保存され、JSONバックアップには含まれません。</p>
+          <p class="muted">在庫・購入履歴・消費履歴・使用ペースを、指定したGoogle Apps Script Web AppのURLへ送信します。URL・トークンはこの端末内にのみ保存され、JSONバックアップには含まれません。</p>
           <div class="modal-form">
             <label>Web App URL<input id="sheets-sync-url-input" placeholder="https://script.google.com/macros/s/.../exec"></label>
             <label>同期トークン（任意）<input id="sheets-sync-token-input" placeholder="GAS側で設定した場合のみ入力"></label>
@@ -156,6 +156,8 @@
             <button id="sheets-sync-btn" class="primary-btn">Sheetsへ同期</button>
           </div>
           <p id="sheets-sync-status" class="muted"></p>
+          <label style="display:flex;align-items:center;gap:8px;margin-top:10px"><input type="checkbox" id="sheets-auto-sync-toggle" style="width:auto"> Google Sheets自動同期（在庫・使用・購入の変更から3秒後に自動送信）</label>
+          <p class="muted">最終送信：<span id="sheets-last-sent-at">まだ送信していません</span></p>
         </section>
         <section class="card danger-zone">
           <h3>統合用コピーだけを削除</h3>

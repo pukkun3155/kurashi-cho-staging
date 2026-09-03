@@ -25,7 +25,9 @@ function buildIntegrated(source){return normalizeState({metadata:{schemaVersion:
 function validIntegrated(value){return!!value&&typeof value==='object'&&!Array.isArray(value)&&value.shopping&&Array.isArray(value.belongings)}
 function counts(data){return{shopping:array(data?.shopping?.shoppingList).length,inventory:array(data?.shopping?.inventory).length,belongings:array(data?.belongings).length}}
 function persist(message){state.metadata={...(state.metadata||{}),schemaVersion:VERSION,mode:'integrated-editing',updatedAt:nowIso()};writeJson(KEYS.integrated,state);renderAll();if(message)showToast(message)}
-function load(){const saved=readJson(KEYS.integrated);state=validIntegrated(saved)?normalizeState(saved):buildIntegrated({shopping:null,belongings:null});renderAll();loadSheetsSyncConfig();if(!validIntegrated(saved))showMigrationIfAvailable()}
+// 起動時、自動同期が有効かつ前回終了時に未送信の変更が残っていた場合は、
+// markSheetsDirty()と同じ経路（3秒デバウンス後に1回送信）に乗せて送り直す。
+function load(){const saved=readJson(KEYS.integrated);state=validIntegrated(saved)?normalizeState(saved):buildIntegrated({shopping:null,belongings:null});renderAll();loadSheetsSyncConfig();loadSheetsAutoSyncConfig();if(isSheetsAutoSyncEnabled()&&isSheetsDirty())markSheetsDirty();if(!validIntegrated(saved))showMigrationIfAvailable()}
 function showMigrationIfAvailable(){const source=sourceSnapshot();if(!source.shopping&&!source.belongings)return;const c=counts(source);$('detected-counts').innerHTML=`買うもの <strong>${c.shopping}件</strong><br>在庫 <strong>${c.inventory}件</strong><br>持ち物 <strong>${c.belongings}件</strong>`;$('migration-modal').hidden=false}
 function importSources(){const source=sourceSnapshot();if(!source.shopping&&!source.belongings){showToast('この端末に元アプリのデータが見つかりません');return}if(readJson(KEYS.integrated))writeJson(KEYS.backup,state);state=buildIntegrated(source);writeJson(KEYS.integrated,state);$('migration-modal').hidden=true;renderAll();const c=counts(state);showToast(`取り込みました（合計${c.shopping+c.inventory+c.belongings}件）`)}
 
@@ -127,15 +129,20 @@ function renderSettings(){const c=counts(state),integrated=readJson(KEYS.integra
 function addShopping(){const name=$('shopping-name').value.trim();if(!name){showToast('商品名を入力してください');return}const raw=$('shopping-qty').value,qty=raw===''?null:Number(raw);state.shopping.shoppingList.push({id:uid('shop'),productName:name,plannedQuantity:Number.isFinite(qty)?qty:null,unit:$('shopping-unit').value.trim()||null,note:$('shopping-note').value.trim()||null,createdAt:nowIso()});['shopping-name','shopping-qty','shopping-unit','shopping-note'].forEach(id=>$(id).value='');persist('買うものに追加しました')}
 // purchaseLog.quantityが「実際に購入した数量」を表す（plannedQuantityとは別物）。
 // purchasedQuantityという別フィールドは追加しない。
-function recordPurchase(item,qty){state.shopping.purchaseLog.push({id:uid('purchase'),date:today(),productName:item.productName,quantity:qty,unit:item.unit||'',sourceShoppingId:item.id})}
+// markSheetsDirty()はここと下のapplyInventoryAddition/createInventoryItem/
+// recalcConsumptionRateにまとめて仕込む。これらはpurchaseToInventory・
+// confirmUseInventory・saveBelonging（購入フロー時のみ）が共通で呼ぶ「実際に
+// 在庫/購入履歴/消費履歴/使用ペースを変更する」処理そのものなので、呼び出し元
+// 個別に条件分岐を書かずに、対象イベントだけを漏れなく拾える。
+function recordPurchase(item,qty){state.shopping.purchaseLog.push({id:uid('purchase'),date:today(),productName:item.productName,quantity:qty,unit:item.unit||'',sourceShoppingId:item.id});markSheetsDirty()}
 function removeShopping(id){state.shopping.shoppingList=state.shopping.shoppingList.filter(i=>i.id!==id)}
 // 在庫への加算処理はここ1か所に集約する。purchaseToInventory()と、
 // 「購入→持ち物」で在庫連携した場合の両方から呼び出し、二重加算を防ぐ。
-function applyInventoryAddition(inventoryId,qty){const item=state.shopping.inventory.find(i=>i.id===inventoryId);if(!item)return;item.confirmedQuantity=(Number(item.confirmedQuantity)||0)+qty;item.lastConfirmedDate=today()}
+function applyInventoryAddition(inventoryId,qty){const item=state.shopping.inventory.find(i=>i.id===inventoryId);if(!item)return;item.confirmedQuantity=(Number(item.confirmedQuantity)||0)+qty;item.lastConfirmedDate=today();markSheetsDirty()}
 // 新規在庫商品を1件だけ作成して返す。呼び出し側でapplyInventoryAddition()を
 // 重ねて呼ばないこと（作成時のconfirmedQuantityがそのまま初期在庫になるため、
 // 追加加算すると二重計上になる）。
-function createInventoryItem(productName,qty,unit){const newId=uid('inv');state.shopping.inventory.push({id:newId,productName,confirmedQuantity:qty,unit:unit||null,lastConfirmedDate:today(),category:'consumable',note:''});return newId}
+function createInventoryItem(productName,qty,unit){const newId=uid('inv');state.shopping.inventory.push({id:newId,productName,confirmedQuantity:qty,unit:unit||null,lastConfirmedDate:today(),category:'consumable',note:''});markSheetsDirty();return newId}
 function purchaseToInventory(id,qty){const item=state.shopping.shoppingList.find(i=>i.id===id);if(!item)return;const existing=state.shopping.inventory.find(i=>norm(i.productName)===norm(item.productName));if(existing){applyInventoryAddition(existing.id,qty);existing.unit=existing.unit||item.unit||null}else state.shopping.inventory.push({id:uid('inv'),productName:item.productName,confirmedQuantity:qty,unit:item.unit||null,lastConfirmedDate:today(),category:'consumable',note:item.note||'買い物リストから登録'});recordPurchase(item,qty);removeShopping(id);persist(`${item.productName}を在庫へ登録しました`)}
 
 // ---- 使用数量の記録・使用ペース再計算 ----
@@ -160,6 +167,7 @@ function recalcConsumptionRate(inventoryId){
   const existingIndex=state.shopping.consumptionRates.findIndex(r=>r.inventoryId===inventoryId);
   if(existingIndex>=0)state.shopping.consumptionRates[existingIndex]={...state.shopping.consumptionRates[existingIndex],...rateValues};
   else state.shopping.consumptionRates.push(rateValues);
+  markSheetsDirty();
 }
 let useInventoryId=null;
 function openUseInventoryModal(id){const item=state.shopping.inventory.find(i=>i.id===id);if(!item||item.confirmedQuantity==null)return;useInventoryId=id;$('use-inventory-name').textContent=item.productName||'名称未設定';$('use-inventory-current').textContent=`${item.confirmedQuantity}${item.unit||''}`;$('use-inventory-unit-label').textContent=item.unit||'';$('use-inventory-qty').value='';$('use-inventory-modal').hidden=false;setTimeout(()=>$('use-inventory-qty').focus(),30)}
@@ -176,6 +184,7 @@ function confirmUseInventory(){
   item.confirmedQuantity=Math.max(0,Number(item.confirmedQuantity)-qty);
   item.lastConfirmedDate=today();
   state.shopping.consumptionLog.push({id:uid('consume'),inventoryId,productName:item.productName,quantity:qty,unit:item.unit||'',date:today(),createdAt:nowIso()});
+  markSheetsDirty();
   recalcConsumptionRate(inventoryId);
   closeUseInventoryModal();
   persist('使用を記録しました');
@@ -242,7 +251,7 @@ function saveBelonging(){
 }
 function closeBelongingModal(){$('belonging-modal').hidden=true;belongingEditId=null;purchaseShoppingId=null;purchaseQtyConfirmed=null}
 function openInventoryModal(id=null){inventoryEditId=id;const item=id?state.shopping.inventory.find(i=>i.id===id):null;$('inventory-modal-title').textContent=id?'在庫を編集':'在庫を追加';$('inventory-name-edit').value=item?.productName||'';$('inventory-qty-edit').value=item?.confirmedQuantity??'';$('inventory-unit-edit').value=item?.unit||'';$('inventory-note-edit').value=item?.note||'';$('inventory-modal').hidden=false;setTimeout(()=>$('inventory-name-edit').focus(),30)}
-function saveInventory(){const name=$('inventory-name-edit').value.trim(),raw=$('inventory-qty-edit').value,qty=Number(raw),wasEdit=!!inventoryEditId;if(!name||raw===''||!Number.isFinite(qty)||qty<0){showToast('商品名と0以上の数量を入力してください');return}const values={productName:name,confirmedQuantity:qty,unit:$('inventory-unit-edit').value.trim()||null,note:$('inventory-note-edit').value.trim()||null,lastConfirmedDate:today()};let savedId=inventoryEditId;if(inventoryEditId){const index=state.shopping.inventory.findIndex(i=>i.id===inventoryEditId);if(index>=0)state.shopping.inventory[index]={...state.shopping.inventory[index],...values}}else{savedId=uid('inv');state.shopping.inventory.push({id:savedId,category:'consumable',...values})}closeInventoryModal();persist(wasEdit?'在庫を更新しました':'在庫を追加しました');maybePromptAddToShopping(state.shopping.inventory.find(i=>i.id===savedId))}
+function saveInventory(){const name=$('inventory-name-edit').value.trim(),raw=$('inventory-qty-edit').value,qty=Number(raw),wasEdit=!!inventoryEditId;if(!name||raw===''||!Number.isFinite(qty)||qty<0){showToast('商品名と0以上の数量を入力してください');return}const values={productName:name,confirmedQuantity:qty,unit:$('inventory-unit-edit').value.trim()||null,note:$('inventory-note-edit').value.trim()||null,lastConfirmedDate:today()};let savedId=inventoryEditId;if(inventoryEditId){const index=state.shopping.inventory.findIndex(i=>i.id===inventoryEditId);if(index>=0)state.shopping.inventory[index]={...state.shopping.inventory[index],...values}}else{savedId=uid('inv');state.shopping.inventory.push({id:savedId,category:'consumable',...values})}closeInventoryModal();markSheetsDirty();persist(wasEdit?'在庫を更新しました':'在庫を追加しました');maybePromptAddToShopping(state.shopping.inventory.find(i=>i.id===savedId))}
 function closeInventoryModal(){$('inventory-modal').hidden=true;inventoryEditId=null}
 // 「在庫を確認」操作後、確定数量が少なければ買い物リストへの追加を提案する。
 // あくまで選択肢を示すだけで、ユーザーがボタンを押さない限り買い物リストは変更しない。
@@ -271,7 +280,7 @@ function confirmHomeAddShopping(){
   closeHomeAddShoppingModal();
   persist('買うものに追加しました');
 }
-function handleListAction(event){const button=event.target.closest('[data-action]');if(!button)return;const{id,action}=button.dataset;if(action==='buy-inventory')openPurchaseQtyModal(id,'inventory');if(action==='buy-belonging')openPurchaseQtyModal(id,'belonging');if(action==='edit-belonging')openBelongingModal(id);if(action==='edit-inventory')openInventoryModal(id);if(action==='check-stock')openInventoryModal(id);if(action==='use-inventory')openUseInventoryModal(id);if(action==='add-to-shopping-from-home')openHomeAddShoppingModal(id);if(action==='delete-shopping'&&confirm('この買うものを削除しますか？')){removeShopping(id);persist('買うものから削除しました')}if(action==='delete-belonging'&&confirm('この持ち物を削除しますか？')){state.belongings=state.belongings.filter(i=>i.id!==id);persist('持ち物を削除しました')}if(action==='delete-inventory'&&confirm('この在庫を削除しますか？')){state.shopping.inventory=state.shopping.inventory.filter(i=>i.id!==id);persist('在庫を削除しました')}}
+function handleListAction(event){const button=event.target.closest('[data-action]');if(!button)return;const{id,action}=button.dataset;if(action==='buy-inventory')openPurchaseQtyModal(id,'inventory');if(action==='buy-belonging')openPurchaseQtyModal(id,'belonging');if(action==='edit-belonging')openBelongingModal(id);if(action==='edit-inventory')openInventoryModal(id);if(action==='check-stock')openInventoryModal(id);if(action==='use-inventory')openUseInventoryModal(id);if(action==='add-to-shopping-from-home')openHomeAddShoppingModal(id);if(action==='delete-shopping'&&confirm('この買うものを削除しますか？')){removeShopping(id);persist('買うものから削除しました')}if(action==='delete-belonging'&&confirm('この持ち物を削除しますか？')){state.belongings=state.belongings.filter(i=>i.id!==id);persist('持ち物を削除しました')}if(action==='delete-inventory'&&confirm('この在庫を削除しますか？')){state.shopping.inventory=state.shopping.inventory.filter(i=>i.id!==id);markSheetsDirty();persist('在庫を削除しました')}}
 
 function showView(name){document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active',v.id===`view-${name}`));document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===name));window.scrollTo({top:0,behavior:'smooth'});$('main').focus({preventScroll:true})}
 function globalSearch(){const q=norm($('global-search').value),box=$('search-results');if(!q){box.hidden=true;box.innerHTML='';return}const results=[];array(state.shopping.shoppingList).forEach(i=>{if(norm([i.productName,i.note].join(' ')).includes(q))results.push({kind:'買うもの',name:i.productName,meta:i.note||''})});array(state.shopping.inventory).forEach(i=>{if(norm([i.productName,i.note].join(' ')).includes(q))results.push({kind:'在庫',name:i.productName,meta:i.confirmedQuantity==null?'数量要確認':`${i.confirmedQuantity}${i.unit||''}`})});array(state.belongings).forEach(i=>{if(norm([i.name,i.location,i.detail].join(' ')).includes(q))results.push({kind:'持ち物',name:i.name,meta:i.location||''})});box.hidden=false;box.innerHTML=results.length?results.slice(0,20).map(r=>`<div class="result-row"><div class="result-kind">${esc(r.kind)}</div><strong>${esc(r.name||'名称未設定')}</strong>${r.meta?`<div class="meta">${esc(r.meta)}</div>`:''}</div>`).join(''):'<div class="empty">見つかりませんでした</div>'}
@@ -279,8 +288,8 @@ function backupJson(){return JSON.stringify(state,null,2)}
 function showJsonModal(){$('json-text').value=backupJson();$('json-modal').hidden=false}
 async function copyJson(){if(!readJson(KEYS.integrated)){showToast('先に統合データを作成してください');return}const text=backupJson();try{await navigator.clipboard.writeText(text);showToast('JSONをコピーしました')}catch{showJsonModal();$('json-text').focus();$('json-text').select();showToast('下の文字を選択してコピーしてください')}}
 async function exportIntegrated(){if(!readJson(KEYS.integrated)){showToast('先に統合データを作成してください');return}const name=`kurashi-cho-backup-${today()}.json`,file=new File([backupJson()],name,{type:'application/json'});if(navigator.share&&navigator.canShare?.({files:[file]})){try{await navigator.share({files:[file],title:'くらし帖バックアップ'});showToast('バックアップを共有しました');return}catch(e){if(e.name==='AbortError')return}}showJsonModal();showToast('JSONをコピーして保存してください')}
-async function importFile(file){try{const parsed=JSON.parse(await file.text());if(!validIntegrated(parsed))throw new Error('統合版のJSON形式ではありません');state=normalizeState(parsed);persist('統合データを読み込みました')}catch(e){showToast(`読み込めませんでした：${e.message}`)}}
-async function importSourceFile(file){try{const parsed=JSON.parse(await file.text());if(validIntegrated(parsed)){state=normalizeState(parsed);persist('統合版のバックアップを読み込みました');return}let kind=null,data=null;if(Array.isArray(parsed)){kind='belongings';data=parsed}else if(Array.isArray(parsed?.ledger)){kind='belongings';data=parsed.ledger}else if(Array.isArray(parsed?.inventory)&&Array.isArray(parsed?.shoppingList)){kind='shopping';data=parsed}if(!kind)throw new Error('かいもの帖／持ち物台帳のJSON形式ではありません');writeJson(KEYS.backup,state);state=buildIntegrated({shopping:kind==='shopping'?data:state.shopping,belongings:kind==='belongings'?data:state.belongings});persist(kind==='shopping'?'かいもの帖のデータを取り込みました':'持ち物台帳のデータを取り込みました')}catch(e){showToast(`読み込めませんでした：${e.message}`)}}
+async function importFile(file){try{const parsed=JSON.parse(await file.text());if(!validIntegrated(parsed))throw new Error('統合版のJSON形式ではありません');state=normalizeState(parsed);markSheetsDirty();persist('統合データを読み込みました')}catch(e){showToast(`読み込めませんでした：${e.message}`)}}
+async function importSourceFile(file){try{const parsed=JSON.parse(await file.text());if(validIntegrated(parsed)){state=normalizeState(parsed);markSheetsDirty();persist('統合版のバックアップを読み込みました');return}let kind=null,data=null;if(Array.isArray(parsed)){kind='belongings';data=parsed}else if(Array.isArray(parsed?.ledger)){kind='belongings';data=parsed.ledger}else if(Array.isArray(parsed?.inventory)&&Array.isArray(parsed?.shoppingList)){kind='shopping';data=parsed}if(!kind)throw new Error('かいもの帖／持ち物台帳のJSON形式ではありません');writeJson(KEYS.backup,state);state=buildIntegrated({shopping:kind==='shopping'?data:state.shopping,belongings:kind==='belongings'?data:state.belongings});markSheetsDirty();persist(kind==='shopping'?'かいもの帖のデータを取り込みました':'持ち物台帳のデータを取り込みました')}catch(e){showToast(`読み込めませんでした：${e.message}`)}}
 function clearIntegrated(){if(!confirm('統合データを削除しますか？\n元アプリのデータは削除されません。'))return;localStorage.removeItem(KEYS.integrated);state=buildIntegrated({shopping:null,belongings:null});renderAll();showToast('統合データを削除しました');showMigrationIfAvailable()}
 function showToast(message){const el=$('toast');clearTimeout(toastTimer);el.textContent=message;el.classList.add('show');toastTimer=setTimeout(()=>el.classList.remove('show'),3200)}
 
@@ -298,6 +307,34 @@ function saveSheetsSyncConfig(){
   if(url)localStorage.setItem(SHEETS_SYNC_URL_KEY,url);else localStorage.removeItem(SHEETS_SYNC_URL_KEY);
   if(token)localStorage.setItem(SHEETS_SYNC_TOKEN_KEY,token);else localStorage.removeItem(SHEETS_SYNC_TOKEN_KEY);
   showToast('同期設定を保存しました');
+}
+
+// ---- Google Sheets自動同期（手動同期はそのまま残し、追加のトリガーとして提供） ----
+// ON/OFF・未送信フラグ・最終送信日時は、URL/トークンと同様にkurashi-cho-v1とは
+// 別のlocalStorageキーに保存する（JSONバックアップに含めない）。
+const SHEETS_AUTO_SYNC_KEY='kurashi-cho-sheets-auto-sync';
+const SHEETS_DIRTY_KEY='kurashi-cho-sheets-dirty';
+const SHEETS_LAST_SENT_AT_KEY='kurashi-cho-sheets-last-sent-at';
+const SHEETS_AUTO_SYNC_DEBOUNCE_MS=3000;
+let sheetsAutoSyncTimer=null;
+const isSheetsAutoSyncEnabled=()=>localStorage.getItem(SHEETS_AUTO_SYNC_KEY)==='1';
+const isSheetsDirty=()=>localStorage.getItem(SHEETS_DIRTY_KEY)==='1';
+const getSheetsLastSentAt=()=>localStorage.getItem(SHEETS_LAST_SENT_AT_KEY)||'';
+function clearSheetsDirty(){localStorage.removeItem(SHEETS_DIRTY_KEY)}
+function renderSheetsLastSentAt(){const iso=getSheetsLastSentAt();$('sheets-last-sent-at').textContent=iso?new Date(iso).toLocaleString('ja-JP'):'まだ送信していません'}
+function loadSheetsAutoSyncConfig(){$('sheets-auto-sync-toggle').checked=isSheetsAutoSyncEnabled();renderSheetsLastSentAt()}
+function toggleSheetsAutoSync(){localStorage.setItem(SHEETS_AUTO_SYNC_KEY,$('sheets-auto-sync-toggle').checked?'1':'0')}
+// 在庫・購入履歴・消費履歴・使用ペースのいずれかが変わった直後にだけ呼ぶ
+// （買い物リスト・持ち物単体の変更では呼ばない）。3秒以内に連続で呼ばれた場合は
+// タイマーをリセットし、最後の呼び出しから3秒後に1回だけ送信する（連打防止）。
+// 未送信フラグは呼ばれた時点で即localStorageへ書き込む＝アプリを閉じても
+// 「送っていない変更がある」ことを次回起動時に検知できる。
+function markSheetsDirty(){
+  if(!isSheetsAutoSyncEnabled())return;
+  localStorage.setItem(SHEETS_DIRTY_KEY,'1');
+  if(!getSheetsSyncUrl())return;
+  clearTimeout(sheetsAutoSyncTimer);
+  sheetsAutoSyncTimer=setTimeout(()=>{sheetsAutoSyncTimer=null;syncToSheets()},SHEETS_AUTO_SYNC_DEBOUNCE_MS);
 }
 // 送信するのはinventory/purchaseLog/consumptionLog/consumptionRatesの4種のみ。
 // shoppingList・belongings・settings・metadata等は送らない（読み取り専用連携の対象外）。
@@ -325,8 +362,15 @@ async function syncToSheets(){
     // Content-Typeは既存どおり明示しない（プリフライト回避、GAS側はe.postData.contents
     // を生文字列として受け取りJSON.parseするため問題ない）。
     await fetch(url,{method:'POST',mode:'no-cors',body:JSON.stringify(payload)});
-    statusEl.textContent=`同期要求を送信しました（${new Date().toLocaleString('ja-JP')}）。Google Sheetsで結果を確認してください。`;
+    const sentAt=new Date();
+    statusEl.textContent=`同期要求を送信しました（${sentAt.toLocaleString('ja-JP')}）。Google Sheetsで結果を確認してください。`;
     showToast('同期要求を送信しました。Google Sheetsで結果を確認してください');
+    // no-corsのため「GAS側で正常処理された」ことの断定はできない。ここでクリアするのは
+    // あくまで「ブラウザから送信できた（例外が出なかった）」という事実のみ。手動同期でも
+    // 同じ制約なので、両者を区別せず同じ基準で未送信フラグを扱う。
+    localStorage.setItem(SHEETS_LAST_SENT_AT_KEY,sentAt.toISOString());
+    clearSheetsDirty();
+    renderSheetsLastSentAt();
   }catch(e){
     statusEl.textContent=`送信できませんでした：${e.message}`;
     showToast('送信できませんでした（通信エラー）');
@@ -339,7 +383,7 @@ document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>show
 $('global-search').addEventListener('input',globalSearch);$('shopping-search').addEventListener('input',renderShopping);$('shopping-sort').addEventListener('change',renderShopping);$('inventory-search').addEventListener('input',renderInventory);$('inventory-sort').addEventListener('change',renderInventory);$('belongings-search').addEventListener('input',renderBelongings);$('belongings-category').addEventListener('change',renderBelongings);$('belongings-location').addEventListener('change',renderBelongings);$('belongings-sort').addEventListener('change',renderBelongings);
 $('shopping-list').addEventListener('click',handleListAction);$('inventory-list').addEventListener('click',handleListAction);$('belongings-list').addEventListener('click',handleListAction);$('stock-check-list').addEventListener('click',handleListAction);
 $('add-shopping-btn').addEventListener('click',addShopping);$('add-inventory-btn').addEventListener('click',()=>openInventoryModal());$('add-belonging-btn').addEventListener('click',()=>openBelongingModal());$('home-add-belonging').addEventListener('click',()=>openBelongingModal());
-$('belonging-cancel').addEventListener('click',closeBelongingModal);$('belonging-save').addEventListener('click',saveBelonging);$('belonging-inventory-link').addEventListener('change',updateBelongingNewStockUI);$('inventory-cancel').addEventListener('click',closeInventoryModal);$('inventory-save').addEventListener('click',saveInventory);$('stock-prompt-skip').addEventListener('click',closeStockPrompt);$('stock-prompt-add').addEventListener('click',confirmStockPromptAdd);$('purchase-qty-cancel').addEventListener('click',closePurchaseQtyModal);$('purchase-qty-confirm').addEventListener('click',confirmPurchaseQty);$('use-inventory-cancel').addEventListener('click',closeUseInventoryModal);$('use-inventory-confirm').addEventListener('click',confirmUseInventory);$('home-add-shopping-cancel').addEventListener('click',closeHomeAddShoppingModal);$('home-add-shopping-confirm').addEventListener('click',confirmHomeAddShopping);$('sheets-sync-config-save').addEventListener('click',saveSheetsSyncConfig);$('sheets-sync-btn').addEventListener('click',syncToSheets);
+$('belonging-cancel').addEventListener('click',closeBelongingModal);$('belonging-save').addEventListener('click',saveBelonging);$('belonging-inventory-link').addEventListener('change',updateBelongingNewStockUI);$('inventory-cancel').addEventListener('click',closeInventoryModal);$('inventory-save').addEventListener('click',saveInventory);$('stock-prompt-skip').addEventListener('click',closeStockPrompt);$('stock-prompt-add').addEventListener('click',confirmStockPromptAdd);$('purchase-qty-cancel').addEventListener('click',closePurchaseQtyModal);$('purchase-qty-confirm').addEventListener('click',confirmPurchaseQty);$('use-inventory-cancel').addEventListener('click',closeUseInventoryModal);$('use-inventory-confirm').addEventListener('click',confirmUseInventory);$('home-add-shopping-cancel').addEventListener('click',closeHomeAddShoppingModal);$('home-add-shopping-confirm').addEventListener('click',confirmHomeAddShopping);$('sheets-sync-config-save').addEventListener('click',saveSheetsSyncConfig);$('sheets-sync-btn').addEventListener('click',syncToSheets);$('sheets-auto-sync-toggle').addEventListener('change',toggleSheetsAutoSync);
 $('migration-confirm').addEventListener('click',importSources);$('migration-later').addEventListener('click',()=>$('migration-modal').hidden=true);
 $('import-sources-btn').addEventListener('click',()=>{if(readJson(KEYS.integrated)&&!confirm('現在の統合データを元アプリのデータで置き換えますか？\n現在の内容は端末内に自動バックアップします。'))return;importSources()});$('refresh-btn').addEventListener('click',()=>{renderAll();showToast('表示を更新しました')});
 $('export-btn').addEventListener('click',exportIntegrated);$('copy-json-btn').addEventListener('click',copyJson);$('json-close').addEventListener('click',()=>$('json-modal').hidden=true);$('json-copy-again').addEventListener('click',copyJson);$('import-source-file-btn').addEventListener('click',()=>$('import-source-file').click());$('import-source-file').addEventListener('change',e=>{const file=e.target.files?.[0];if(file)importSourceFile(file);e.target.value=''});$('import-btn').addEventListener('click',()=>$('import-file').click());$('import-file').addEventListener('change',e=>{const file=e.target.files?.[0];if(file)importFile(file);e.target.value=''});$('clear-integrated-btn').addEventListener('click',clearIntegrated);
