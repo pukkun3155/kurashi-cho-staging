@@ -25,7 +25,7 @@ function buildIntegrated(source){return normalizeState({metadata:{schemaVersion:
 function validIntegrated(value){return!!value&&typeof value==='object'&&!Array.isArray(value)&&value.shopping&&Array.isArray(value.belongings)}
 function counts(data){return{shopping:array(data?.shopping?.shoppingList).length,inventory:array(data?.shopping?.inventory).length,belongings:array(data?.belongings).length}}
 function persist(message){state.metadata={...(state.metadata||{}),schemaVersion:VERSION,mode:'integrated-editing',updatedAt:nowIso()};writeJson(KEYS.integrated,state);renderAll();if(message)showToast(message)}
-function load(){const saved=readJson(KEYS.integrated);state=validIntegrated(saved)?normalizeState(saved):buildIntegrated({shopping:null,belongings:null});renderAll();if(!validIntegrated(saved))showMigrationIfAvailable()}
+function load(){const saved=readJson(KEYS.integrated);state=validIntegrated(saved)?normalizeState(saved):buildIntegrated({shopping:null,belongings:null});renderAll();loadSheetsSyncConfig();if(!validIntegrated(saved))showMigrationIfAvailable()}
 function showMigrationIfAvailable(){const source=sourceSnapshot();if(!source.shopping&&!source.belongings)return;const c=counts(source);$('detected-counts').innerHTML=`買うもの <strong>${c.shopping}件</strong><br>在庫 <strong>${c.inventory}件</strong><br>持ち物 <strong>${c.belongings}件</strong>`;$('migration-modal').hidden=false}
 function importSources(){const source=sourceSnapshot();if(!source.shopping&&!source.belongings){showToast('この端末に元アプリのデータが見つかりません');return}if(readJson(KEYS.integrated))writeJson(KEYS.backup,state);state=buildIntegrated(source);writeJson(KEYS.integrated,state);$('migration-modal').hidden=true;renderAll();const c=counts(state);showToast(`取り込みました（合計${c.shopping+c.inventory+c.belongings}件）`)}
 
@@ -284,11 +284,65 @@ async function importSourceFile(file){try{const parsed=JSON.parse(await file.tex
 function clearIntegrated(){if(!confirm('統合データを削除しますか？\n元アプリのデータは削除されません。'))return;localStorage.removeItem(KEYS.integrated);state=buildIntegrated({shopping:null,belongings:null});renderAll();showToast('統合データを削除しました');showMigrationIfAvailable()}
 function showToast(message){const el=$('toast');clearTimeout(toastTimer);el.textContent=message;el.classList.add('show');toastTimer=setTimeout(()=>el.classList.remove('show'),3200)}
 
+// ---- Google Sheets同期（読み取り専用連携の第1段階：送信のみ） ----
+// Web App URL・トークンは利用者ごとに異なる設定値なのでソースに埋め込まず、
+// 統合データ(kurashi-cho-v1)とは別のlocalStorageキーに保存する。
+// これにより、JSONバックアップ(backupJson)には一切含まれない（stateのみをJSON化するため）。
+const SHEETS_SYNC_URL_KEY='kurashi-cho-sheets-sync-url';
+const SHEETS_SYNC_TOKEN_KEY='kurashi-cho-sheets-sync-token';
+const getSheetsSyncUrl=()=>localStorage.getItem(SHEETS_SYNC_URL_KEY)||'';
+const getSheetsSyncToken=()=>localStorage.getItem(SHEETS_SYNC_TOKEN_KEY)||'';
+function loadSheetsSyncConfig(){$('sheets-sync-url-input').value=getSheetsSyncUrl();$('sheets-sync-token-input').value=getSheetsSyncToken()}
+function saveSheetsSyncConfig(){
+  const url=$('sheets-sync-url-input').value.trim(),token=$('sheets-sync-token-input').value.trim();
+  if(url)localStorage.setItem(SHEETS_SYNC_URL_KEY,url);else localStorage.removeItem(SHEETS_SYNC_URL_KEY);
+  if(token)localStorage.setItem(SHEETS_SYNC_TOKEN_KEY,token);else localStorage.removeItem(SHEETS_SYNC_TOKEN_KEY);
+  showToast('同期設定を保存しました');
+}
+// 送信するのはinventory/purchaseLog/consumptionLog/consumptionRatesの4種のみ。
+// shoppingList・belongings・settings・metadata等は送らない（読み取り専用連携の対象外）。
+// localStorage(kurashi-cho-v1)自体はここでは一切書き換えない（送信のみ・読み込みなし）。
+async function syncToSheets(){
+  const url=getSheetsSyncUrl();
+  if(!url){showToast('先にWeb App URLを設定してください');return}
+  const payload={
+    token:getSheetsSyncToken()||undefined,
+    inventory:array(state.shopping.inventory).map(i=>({id:i.id,productName:i.productName,confirmedQuantity:i.confirmedQuantity,unit:i.unit,lastConfirmedDate:i.lastConfirmedDate,category:i.category,note:i.note})),
+    purchaseLog:array(state.shopping.purchaseLog),
+    consumptionLog:array(state.shopping.consumptionLog),
+    consumptionRates:array(state.shopping.consumptionRates),
+  };
+  const btn=$('sheets-sync-btn'),statusEl=$('sheets-sync-status');
+  btn.disabled=true;
+  statusEl.textContent='同期中…';
+  try{
+    // Content-Typeを明示するとGAS Web Appへのブラウザ直POSTでプリフライト(OPTIONS)が
+    // 発生し失敗するため、あえてヘッダーを指定しない（ブラウザ既定のtext/plainで送る。
+    // GAS側はe.postData.contentsを生文字列として受け取りJSON.parseするため問題ない）。
+    const res=await fetch(url,{method:'POST',body:JSON.stringify(payload)});
+    const text=await res.text();
+    let data;
+    try{data=JSON.parse(text)}catch{throw new Error('応答がJSON形式ではありません（Web Appのデプロイ設定をご確認ください）')}
+    if(data.ok){
+      statusEl.textContent=`同期しました（${new Date().toLocaleString('ja-JP')}）`;
+      showToast('Google Sheetsへ同期しました');
+    }else{
+      statusEl.textContent=`同期に失敗しました：${data.error||'不明なエラー'}`;
+      showToast('同期に失敗しました');
+    }
+  }catch(e){
+    statusEl.textContent=`同期に失敗しました：${e.message}`;
+    showToast('同期に失敗しました（通信エラー）');
+  }finally{
+    btn.disabled=false;
+  }
+}
+
 document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>showView(t.dataset.view)));document.querySelectorAll('[data-go]').forEach(t=>t.addEventListener('click',()=>showView(t.dataset.go)));
 $('global-search').addEventListener('input',globalSearch);$('shopping-search').addEventListener('input',renderShopping);$('shopping-sort').addEventListener('change',renderShopping);$('inventory-search').addEventListener('input',renderInventory);$('inventory-sort').addEventListener('change',renderInventory);$('belongings-search').addEventListener('input',renderBelongings);$('belongings-category').addEventListener('change',renderBelongings);$('belongings-location').addEventListener('change',renderBelongings);$('belongings-sort').addEventListener('change',renderBelongings);
 $('shopping-list').addEventListener('click',handleListAction);$('inventory-list').addEventListener('click',handleListAction);$('belongings-list').addEventListener('click',handleListAction);$('stock-check-list').addEventListener('click',handleListAction);
 $('add-shopping-btn').addEventListener('click',addShopping);$('add-inventory-btn').addEventListener('click',()=>openInventoryModal());$('add-belonging-btn').addEventListener('click',()=>openBelongingModal());$('home-add-belonging').addEventListener('click',()=>openBelongingModal());
-$('belonging-cancel').addEventListener('click',closeBelongingModal);$('belonging-save').addEventListener('click',saveBelonging);$('belonging-inventory-link').addEventListener('change',updateBelongingNewStockUI);$('inventory-cancel').addEventListener('click',closeInventoryModal);$('inventory-save').addEventListener('click',saveInventory);$('stock-prompt-skip').addEventListener('click',closeStockPrompt);$('stock-prompt-add').addEventListener('click',confirmStockPromptAdd);$('purchase-qty-cancel').addEventListener('click',closePurchaseQtyModal);$('purchase-qty-confirm').addEventListener('click',confirmPurchaseQty);$('use-inventory-cancel').addEventListener('click',closeUseInventoryModal);$('use-inventory-confirm').addEventListener('click',confirmUseInventory);$('home-add-shopping-cancel').addEventListener('click',closeHomeAddShoppingModal);$('home-add-shopping-confirm').addEventListener('click',confirmHomeAddShopping);
+$('belonging-cancel').addEventListener('click',closeBelongingModal);$('belonging-save').addEventListener('click',saveBelonging);$('belonging-inventory-link').addEventListener('change',updateBelongingNewStockUI);$('inventory-cancel').addEventListener('click',closeInventoryModal);$('inventory-save').addEventListener('click',saveInventory);$('stock-prompt-skip').addEventListener('click',closeStockPrompt);$('stock-prompt-add').addEventListener('click',confirmStockPromptAdd);$('purchase-qty-cancel').addEventListener('click',closePurchaseQtyModal);$('purchase-qty-confirm').addEventListener('click',confirmPurchaseQty);$('use-inventory-cancel').addEventListener('click',closeUseInventoryModal);$('use-inventory-confirm').addEventListener('click',confirmUseInventory);$('home-add-shopping-cancel').addEventListener('click',closeHomeAddShoppingModal);$('home-add-shopping-confirm').addEventListener('click',confirmHomeAddShopping);$('sheets-sync-config-save').addEventListener('click',saveSheetsSyncConfig);$('sheets-sync-btn').addEventListener('click',syncToSheets);
 $('migration-confirm').addEventListener('click',importSources);$('migration-later').addEventListener('click',()=>$('migration-modal').hidden=true);
 $('import-sources-btn').addEventListener('click',()=>{if(readJson(KEYS.integrated)&&!confirm('現在の統合データを元アプリのデータで置き換えますか？\n現在の内容は端末内に自動バックアップします。'))return;importSources()});$('refresh-btn').addEventListener('click',()=>{renderAll();showToast('表示を更新しました')});
 $('export-btn').addEventListener('click',exportIntegrated);$('copy-json-btn').addEventListener('click',copyJson);$('json-close').addEventListener('click',()=>$('json-modal').hidden=true);$('json-copy-again').addEventListener('click',copyJson);$('import-source-file-btn').addEventListener('click',()=>$('import-source-file').click());$('import-source-file').addEventListener('change',e=>{const file=e.target.files?.[0];if(file)importSourceFile(file);e.target.value=''});$('import-btn').addEventListener('click',()=>$('import-file').click());$('import-file').addEventListener('change',e=>{const file=e.target.files?.[0];if(file)importFile(file);e.target.value=''});$('clear-integrated-btn').addEventListener('click',clearIntegrated);
