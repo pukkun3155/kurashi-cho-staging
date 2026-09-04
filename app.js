@@ -31,7 +31,7 @@ function persist(message){state.metadata={...(state.metadata||{}),schemaVersion:
 // 起動のたびに現在状態を送っておく方が安全という方針）。
 // markSheetsDirty()と同じ経路（3秒デバウンス経由）にそのまま乗せる。URL未設定の
 // 場合はmarkSheetsDirty()内部のガードで何も起きない。
-function load(){const saved=readJson(KEYS.integrated);state=validIntegrated(saved)?normalizeState(saved):buildIntegrated({shopping:null,belongings:null});renderAll();loadSheetsSyncConfig();loadSheetsAutoSyncConfig();if(isSheetsAutoSyncEnabled())markSheetsDirty();if(!validIntegrated(saved))showMigrationIfAvailable()}
+function load(){const saved=readJson(KEYS.integrated);state=validIntegrated(saved)?normalizeState(saved):buildIntegrated({shopping:null,belongings:null});renderAll();loadSheetsSyncConfig();loadSheetsAutoSyncConfig();loadNextShoppingDateConfig();if(isSheetsAutoSyncEnabled())markSheetsDirty();if(!validIntegrated(saved))showMigrationIfAvailable()}
 function showMigrationIfAvailable(){const source=sourceSnapshot();if(!source.shopping&&!source.belongings)return;const c=counts(source);$('detected-counts').innerHTML=`買うもの <strong>${c.shopping}件</strong><br>在庫 <strong>${c.inventory}件</strong><br>持ち物 <strong>${c.belongings}件</strong>`;$('migration-modal').hidden=false}
 function importSources(){const source=sourceSnapshot();if(!source.shopping&&!source.belongings){showToast('この端末に元アプリのデータが見つかりません');return}if(readJson(KEYS.integrated))writeJson(KEYS.backup,state);state=buildIntegrated(source);writeJson(KEYS.integrated,state);$('migration-modal').hidden=true;renderAll();const c=counts(state);showToast(`取り込みました（合計${c.shopping+c.inventory+c.belongings}件）`)}
 
@@ -117,33 +117,113 @@ function buildDailyConsumptionSeries(inventoryId){
   for(let d=observationDays-1;d>=0;d--)series.push(totalByDate[dateOffset(d)]||0);
   return{series,observationDays,logCount:logs.length};
 }
-// 経験的ブートストラップ（復元抽出でhorizonDays日分をサンプリングし、合計消費が
-// 現在在庫以上になる割合）の厳密解。乱数は一切使わず、観測日数n・horizonDays=3の
-// 全組み合わせ(最大n^3=27,000通り、n<=30のため)を直接数え上げる。そのため
-// 再描画しても確率は揺れない（Monte Carloではない）。
-// 「現在在庫」は既存forecastFor()が返すestimateをそのまま使い、ここで
-// consumptionLogを在庫から再度差し引くことはしない（二重計上防止）。
-function stockoutProbability(forecast,dailySeriesInfo,horizonDays=PROBABILITY_HORIZON_DAYS){
+// ---- 第3フェーズ：可変horizonDaysに対応した決定論的DP（確率質量関数の畳み込み） ----
+// 第2フェーズは全組み合わせの直接列挙（horizonDays=3固定、最大n^3=27,000通り）だった。
+// 回帰テストで、同じデータ・horizonDays=3において下記のDP実装と全数探索の結果が
+// 完全に一致する（誤差0）ことを確認済み。horizonDaysが増えると全数探索は組み合わせ
+// 爆発するため、可変horizonDaysに対応するこのDP実装へ置き換える。
+// 全組み合わせの列挙はhorizonDaysが増えると組み合わせ爆発する（n^horizonDays）ため、
+// 代わりに「1日分の経験的消費量分布」をhorizonDays回だけ自己畳み込みし、
+// 累積消費量の分布そのものを構築する。乱数は一切使わないため、同じデータ・同じ
+// horizonDaysなら常に同じ値になる。
+function empiricalDailyDistribution(series){
+  const n=series.length;
+  const counts=new Map();
+  series.forEach(v=>counts.set(v,(counts.get(v)||0)+1));
+  return[...counts.entries()].map(([value,count])=>({value,probability:count/n}));
+}
+// 浮動小数点誤差でDPの合計キーが分裂しないよう、小数第3位で丸めてキー化する
+// （使用数量の入力刻みは0.1のため、実運用データでこの丸めにより精度が失われることはない）。
+const DP_SUM_PRECISION=1000;
+const roundSumKey=x=>Math.round(x*DP_SUM_PRECISION)/DP_SUM_PRECISION;
+// 「現在在庫」は既存forecastFor()が返すestimateをそのまま使い、ここでconsumptionLogを
+// 在庫から再度差し引くことはしない（二重計上防止）。最低データ条件（観測日数7日以上・
+// consumptionLog3件以上）は第2フェーズと同じ。
+function stockoutProbabilityForHorizon(forecast,dailySeriesInfo,horizonDays){
   if(!dailySeriesInfo)return{available:false,reason:'no-log',observationDays:0};
   const{series,observationDays,logCount}=dailySeriesInfo;
   if(observationDays<PROBABILITY_MIN_OBSERVATION_DAYS||logCount<PROBABILITY_MIN_LOG_COUNT||series.length===0){
     return{available:false,reason:'insufficient-data',observationDays};
   }
+  const dist=empiricalDailyDistribution(series);
   const threshold=Math.max(0,forecast.estimate??0);
-  const n=series.length;
-  let stockoutCount=0;
-  const total=Math.pow(n,horizonDays);
-  (function recurse(depth,sum){
-    if(depth===horizonDays){if(sum>=threshold)stockoutCount++;return}
-    for(let i=0;i<n;i++)recurse(depth+1,sum+series[i]);
-  })(0,0);
-  return{available:true,probability:stockoutCount/total,observationDays};
+  let sumDist=new Map([[0,1]]);
+  for(let day=0;day<horizonDays;day++){
+    const next=new Map();
+    sumDist.forEach((prob,sum)=>{
+      dist.forEach(({value,probability})=>{
+        const key=roundSumKey(sum+value);
+        next.set(key,(next.get(key)||0)+prob*probability);
+      });
+    });
+    sumDist=next;
+  }
+  let stockoutProb=0;
+  sumDist.forEach((prob,sum)=>{if(sum>=threshold-1e-9)stockoutProb+=prob});
+  return{available:true,probability:stockoutProb,observationDays};
 }
-function stockoutProbabilityLine(item,forecast){
+// 既存呼び出し元（3日以内の確率）はこのまま新しいDP関数へ委譲する薄いラッパーにする。
+// 第2フェーズの全数探索実装と数学的に同一の値を返すことを回帰テストで確認済み
+// （同じ経験分布の畳み込みなので理論上も一致する）。
+function stockoutProbability(forecast,dailySeriesInfo,horizonDays=PROBABILITY_HORIZON_DAYS){
+  return stockoutProbabilityForHorizon(forecast,dailySeriesInfo,horizonDays);
+}
+function stockoutProbabilityLine(item,forecast,dailySeriesInfo){
   if(forecast.status==='unknown')return'';
-  const result=stockoutProbability(forecast,buildDailyConsumptionSeries(item.id));
+  const result=stockoutProbability(forecast,dailySeriesInfo);
   if(!result.available)return`<span>確率予測：データ蓄積中（観測${esc(result.observationDays)}日）</span>`;
   return`<span>${PROBABILITY_HORIZON_DAYS}日以内に在庫が尽きる確率：${esc(Math.round(result.probability*100))}%</span>`;
+}
+
+// ---- 次回買い物予定日までの在庫切れ確率 ----
+// 予定日はkurashi-cho-v1とは別のlocalStorageキーに保存する。JSONバックアップにも
+// Google Sheets同期にも一切含めない（端末固有の設定として扱う。markSheetsDirty()も呼ばない）。
+const NEXT_SHOPPING_DATE_KEY='kurashi-cho-next-shopping-date';
+// 長期予測の上限。これより先の予定日は「対象外」として表示し、14日へ丸めたりはしない。
+const NEXT_SHOPPING_HORIZON_MAX_DAYS=14;
+const getNextShoppingDate=()=>localStorage.getItem(NEXT_SHOPPING_DATE_KEY)||'';
+function renderNextShoppingDateStatus(){
+  const dateStr=getNextShoppingDate();
+  $('next-shopping-date-status').textContent=dateStr?`現在の設定：${new Date(dateStr+'T00:00:00+09:00').toLocaleDateString('ja-JP')}`:'次回買い物予定日：未設定';
+}
+function loadNextShoppingDateConfig(){$('next-shopping-date-input').value=getNextShoppingDate();renderNextShoppingDateStatus()}
+function saveNextShoppingDate(){
+  const value=$('next-shopping-date-input').value;
+  if(value)localStorage.setItem(NEXT_SHOPPING_DATE_KEY,value);else localStorage.removeItem(NEXT_SHOPPING_DATE_KEY);
+  renderNextShoppingDateStatus();
+  showToast('次回買い物予定日を保存しました');
+  renderAll();
+}
+// horizonDaysの境界定義：
+// ・予定日が今日より前（過去日）→ 計算しない（null）
+// ・予定日が今日ちょうど → 「今日中に買い物へ行く予定だが、その前に在庫が尽きるかもしれない」
+//   という最低限のリスク幅を見るため、horizonDays=1とする（0日先＝計算不能、にはしない）
+// ・予定日が明日以降 → daysBetween(today, 予定日)をそのままhorizonDaysとする
+//   （明日→1、3日後→3、7日後→7、というように素直に日数と一致させる）
+function horizonDaysUntil(dateStr){
+  if(!dateStr)return null;
+  const diff=daysBetween(today(),dateStr);
+  if(diff==null||diff<0)return null;
+  return Math.max(1,diff);
+}
+function nextShoppingProbabilityLine(item,forecast,dailySeriesInfo){
+  const dateStr=getNextShoppingDate();
+  if(!dateStr||forecast.status==='unknown')return'';
+  const d=new Date(dateStr+'T00:00:00+09:00');
+  const dateLabel=`${d.getMonth()+1}月${d.getDate()}日`;
+  const horizonDays=horizonDaysUntil(dateStr);
+  let detail;
+  if(horizonDays==null){
+    detail='買い物日までの確率予測：過去の日付のため計算しません';
+  }else if(horizonDays>NEXT_SHOPPING_HORIZON_MAX_DAYS){
+    detail=`買い物日までの確率予測：${NEXT_SHOPPING_HORIZON_MAX_DAYS}日より先のため長期予測対象外`;
+  }else{
+    const result=stockoutProbabilityForHorizon(forecast,dailySeriesInfo,horizonDays);
+    detail=result.available
+      ?`買い物日までに在庫が尽きる確率：${esc(Math.round(result.probability*100))}%`
+      :`買い物日までの確率予測：データ蓄積中（観測${esc(result.observationDays)}日）`;
+  }
+  return`<span>次回買い物：${esc(dateLabel)}</span><span>${detail}</span>`;
 }
 function forecastCardHtml(item,forecast,prediction){
   let metaHtml;
@@ -155,7 +235,9 @@ function forecastCardHtml(item,forecast,prediction){
     const roundedEstimate=Math.round((forecast.estimate??0)*10)/10;
     const roundedDaysLeft=Math.round((forecast.daysLeft??0)*10)/10;
     const rateText=forecast.rate?`${forecast.rate.quantityPerDay}${forecast.rate.unit||item.unit||''}/日`:'';
-    metaHtml=`<span>確定 ${esc(item.confirmedQuantity)}${esc(item.unit||'')}（${esc(item.lastConfirmedDate)}確認）</span><span>推定在庫 約${esc(roundedEstimate)}${esc(item.unit||'')}</span>${rateText?`<span>使用ペース ${esc(rateText)}</span>`:''}<span>残り 約${esc(roundedDaysLeft)}日</span>${stockoutProbabilityLine(item,forecast)}`;
+    // 3日確率・買い物日までの確率の両方で同じ日別系列を使い回す（二重計算・二重ロードを避ける）。
+    const dailySeriesInfo=buildDailyConsumptionSeries(item.id);
+    metaHtml=`<span>確定 ${esc(item.confirmedQuantity)}${esc(item.unit||'')}（${esc(item.lastConfirmedDate)}確認）</span><span>推定在庫 約${esc(roundedEstimate)}${esc(item.unit||'')}</span>${rateText?`<span>使用ペース ${esc(rateText)}</span>`:''}<span>残り 約${esc(roundedDaysLeft)}日</span>${stockoutProbabilityLine(item,forecast,dailySeriesInfo)}${nextShoppingProbabilityLine(item,forecast,dailySeriesInfo)}`;
   }
   return`<article class="list-card forecast-card forecast-${prediction.category}"><h3>${esc(item.productName||'名称未設定')}</h3><div class="forecast-badge">${prediction.icon} ${esc(prediction.label)}</div><div class="meta">${metaHtml}</div><div class="item-actions"><button class="primary-small" data-action="check-stock" data-id="${esc(item.id)}">在庫を確認</button>${homeAddToShoppingButtonHtml(item,forecast)}</div></article>`;
 }
@@ -451,7 +533,7 @@ document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>show
 $('global-search').addEventListener('input',globalSearch);$('shopping-search').addEventListener('input',renderShopping);$('shopping-sort').addEventListener('change',renderShopping);$('inventory-search').addEventListener('input',renderInventory);$('inventory-sort').addEventListener('change',renderInventory);$('belongings-search').addEventListener('input',renderBelongings);$('belongings-category').addEventListener('change',renderBelongings);$('belongings-location').addEventListener('change',renderBelongings);$('belongings-sort').addEventListener('change',renderBelongings);
 $('shopping-list').addEventListener('click',handleListAction);$('inventory-list').addEventListener('click',handleListAction);$('belongings-list').addEventListener('click',handleListAction);$('stock-check-list').addEventListener('click',handleListAction);
 $('add-shopping-btn').addEventListener('click',addShopping);$('add-inventory-btn').addEventListener('click',()=>openInventoryModal());$('add-belonging-btn').addEventListener('click',()=>openBelongingModal());$('home-add-belonging').addEventListener('click',()=>openBelongingModal());
-$('belonging-cancel').addEventListener('click',closeBelongingModal);$('belonging-save').addEventListener('click',saveBelonging);$('belonging-inventory-link').addEventListener('change',updateBelongingNewStockUI);$('inventory-cancel').addEventListener('click',closeInventoryModal);$('inventory-save').addEventListener('click',saveInventory);$('stock-prompt-skip').addEventListener('click',closeStockPrompt);$('stock-prompt-add').addEventListener('click',confirmStockPromptAdd);$('purchase-qty-cancel').addEventListener('click',closePurchaseQtyModal);$('purchase-qty-confirm').addEventListener('click',confirmPurchaseQty);$('use-inventory-cancel').addEventListener('click',closeUseInventoryModal);$('use-inventory-confirm').addEventListener('click',confirmUseInventory);$('home-add-shopping-cancel').addEventListener('click',closeHomeAddShoppingModal);$('home-add-shopping-confirm').addEventListener('click',confirmHomeAddShopping);$('sheets-sync-config-save').addEventListener('click',saveSheetsSyncConfig);$('sheets-sync-btn').addEventListener('click',syncToSheets);$('sheets-auto-sync-toggle').addEventListener('change',toggleSheetsAutoSync);
+$('belonging-cancel').addEventListener('click',closeBelongingModal);$('belonging-save').addEventListener('click',saveBelonging);$('belonging-inventory-link').addEventListener('change',updateBelongingNewStockUI);$('inventory-cancel').addEventListener('click',closeInventoryModal);$('inventory-save').addEventListener('click',saveInventory);$('stock-prompt-skip').addEventListener('click',closeStockPrompt);$('stock-prompt-add').addEventListener('click',confirmStockPromptAdd);$('purchase-qty-cancel').addEventListener('click',closePurchaseQtyModal);$('purchase-qty-confirm').addEventListener('click',confirmPurchaseQty);$('use-inventory-cancel').addEventListener('click',closeUseInventoryModal);$('use-inventory-confirm').addEventListener('click',confirmUseInventory);$('home-add-shopping-cancel').addEventListener('click',closeHomeAddShoppingModal);$('home-add-shopping-confirm').addEventListener('click',confirmHomeAddShopping);$('sheets-sync-config-save').addEventListener('click',saveSheetsSyncConfig);$('sheets-sync-btn').addEventListener('click',syncToSheets);$('sheets-auto-sync-toggle').addEventListener('change',toggleSheetsAutoSync);$('next-shopping-date-save').addEventListener('click',saveNextShoppingDate);
 $('migration-confirm').addEventListener('click',importSources);$('migration-later').addEventListener('click',()=>$('migration-modal').hidden=true);
 $('import-sources-btn').addEventListener('click',()=>{if(readJson(KEYS.integrated)&&!confirm('現在の統合データを元アプリのデータで置き換えますか？\n現在の内容は端末内に自動バックアップします。'))return;importSources()});$('refresh-btn').addEventListener('click',()=>{renderAll();showToast('表示を更新しました')});
 $('export-btn').addEventListener('click',exportIntegrated);$('copy-json-btn').addEventListener('click',copyJson);$('json-close').addEventListener('click',()=>$('json-modal').hidden=true);$('json-copy-again').addEventListener('click',copyJson);$('import-source-file-btn').addEventListener('click',()=>$('import-source-file').click());$('import-source-file').addEventListener('change',e=>{const file=e.target.files?.[0];if(file)importSourceFile(file);e.target.value=''});$('import-btn').addEventListener('click',()=>$('import-file').click());$('import-file').addEventListener('change',e=>{const file=e.target.files?.[0];if(file)importFile(file);e.target.value=''});$('clear-integrated-btn').addEventListener('click',clearIntegrated);

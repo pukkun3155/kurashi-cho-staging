@@ -145,6 +145,15 @@
           </div>
         </section>
         <section class="card">
+          <h3>次回買い物予定日</h3>
+          <p class="muted">設定すると、在庫切れ予測カードに「買い物日までに在庫が尽きる確率」を追加表示します。この端末内にのみ保存され、JSONバックアップ・Google Sheets同期には含まれません。</p>
+          <div class="modal-form">
+            <label>次回買い物予定日<input type="date" id="next-shopping-date-input"></label>
+          </div>
+          <button id="next-shopping-date-save" class="primary-btn">保存</button>
+          <p class="muted" id="next-shopping-date-status"></p>
+        </section>
+        <section class="card">
           <h3>Google Sheets同期</h3>
           <p class="muted">在庫・購入履歴・消費履歴・使用ペースを、指定したGoogle Apps Script Web AppのURLへ送信します。URL・トークンはこの端末内にのみ保存され、JSONバックアップには含まれません。</p>
           <div class="modal-form">
