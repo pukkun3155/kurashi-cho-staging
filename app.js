@@ -241,14 +241,18 @@ function forecastCardHtml(item,forecast,prediction){
   }
   return`<article class="list-card forecast-card forecast-${prediction.category}"><h3>${esc(item.productName||'名称未設定')}</h3><div class="forecast-badge">${prediction.icon} ${esc(prediction.label)}</div><div class="meta">${metaHtml}</div><div class="item-actions"><button class="primary-small" data-action="check-stock" data-id="${esc(item.id)}">在庫を確認</button>${homeAddToShoppingButtonHtml(item,forecast)}</div></article>`;
 }
-// 🔴🟠のみ「買うものに追加」を出す（⚪は在庫状況が未確定で購入要否を判断できないため）。
 // すでに買うものリストに同名商品があれば、ボタンではなく登録済み表示にする
 // （既存のmaybePromptAddToShoppingと同じ、商品名の正規化一致による重複判定）。
-function homeAddToShoppingButtonHtml(item,forecast){
-  if(forecast.status!=='red'&&forecast.status!=='amber')return'';
+// 在庫切れ予測カード・次回買い物候補一覧の両方で共通利用する。
+function addToShoppingActionHtml(item){
   const alreadyInList=state.shopping.shoppingList.some(s=>norm(s.productName)===norm(item.productName));
   if(alreadyInList)return'<span class="pill">✓ 買うものに登録済み</span>';
   return`<button data-action="add-to-shopping-from-home" data-id="${esc(item.id)}">買うものに追加</button>`;
+}
+// 🔴🟠のみ「買うものに追加」を出す（⚪は在庫状況が未確定で購入要否を判断できないため）。
+function homeAddToShoppingButtonHtml(item,forecast){
+  if(forecast.status!=='red'&&forecast.status!=='amber')return'';
+  return addToShoppingActionHtml(item);
 }
 // 優先順位 red > amber > unknown > green（新しい在庫切れ予測区分）。件数が多い場合は
 // 表示上限(FORECAST_HOME_LIMIT)を維持したまま、優先度の高いものから順に埋める。
@@ -263,7 +267,83 @@ function renderStockCheck(){
   const top=[...groups.red,...groups.amber,...groups.unknown,...groups.green].slice(0,FORECAST_HOME_LIMIT);
   $('stock-check-list').innerHTML=top.length?top.map(({item,forecast,prediction})=>forecastCardHtml(item,forecast,prediction)).join(''):'<div class="empty">確認が必要な在庫は見当たりません</div>'}
 
-function renderAll(){const c=counts(state);$('shopping-count').textContent=c.shopping;$('inventory-count').textContent=c.inventory;$('belongings-count').textContent=c.belongings;const integrated=!!readJson(KEYS.integrated);$('sync-badge').textContent=integrated?'利用中':'未統合';$('sync-badge').classList.toggle('ok',integrated);renderStockCheck();renderToday();renderShopping();renderInventory();renderBelongingFilters();renderBelongings();renderSettings()}
+// ---- 次回の買い物候補（第5フェーズ：あくまで提示のみ。自動追加は一切しない） ----
+// この閾値・分類は既存のstockoutPrediction()（daysLeftベースの🔴🟠🟢⚪判定）とは
+// 完全に別物で、既存判定・forecastFor()には一切影響しない。
+const NEXT_SHOPPING_RECOMMEND_HIGH_THRESHOLD=0.7;
+const NEXT_SHOPPING_RECOMMEND_MEDIUM_THRESHOLD=0.4;
+const NEXT_SHOPPING_RECOMMEND_SHORT_DAYS=3;
+// probabilityInfoは「次回買い物日までの確率計算結果」をそのまま渡す想定：
+// ・horizonDaysが有効(過去日でも14日超過でもない)かつデータ十分 → {available:true, probability}
+// ・horizonDaysが有効だがデータ不足 → {available:false}
+// ・horizonDays自体を計算していない(未設定・過去日・14日超過) → null
+// nullまたはavailable:falseの場合でも、daysLeftが短ければ「履歴不足だが要確認」として拾う
+// （確率・数量は一切推測しない。既存のforecast.daysLeftをそのまま参照するだけ）。
+function nextShoppingRecommendation(item,forecast,probabilityInfo){
+  if(probabilityInfo&&probabilityInfo.available){
+    const p=probabilityInfo.probability;
+    if(p>=NEXT_SHOPPING_RECOMMEND_HIGH_THRESHOLD)return{level:'high',probability:p,reason:'probability'};
+    if(p>=NEXT_SHOPPING_RECOMMEND_MEDIUM_THRESHOLD)return{level:'medium',probability:p,reason:'probability'};
+    return{level:'low',probability:p,reason:'probability'};
+  }
+  if(forecast.daysLeft!=null&&forecast.daysLeft<=NEXT_SHOPPING_RECOMMEND_SHORT_DAYS){
+    return{level:'check',probability:null,reason:'short-days-insufficient-data'};
+  }
+  return{level:null,probability:null,reason:'not-applicable'};
+}
+// 次回買い物予定日が設定されている場合のみ候補を組み立てる。14日より先（horizonDays>14）
+// の商品は確率ベース判定を行わない（勝手に14日へ丸めない）が、daysLeft<=3の
+// 「要確認」フォールバックは次回買い物日の遠近にかかわらず独立して適用される。
+function buildNextShoppingCandidates(){
+  const dateStr=getNextShoppingDate();
+  if(!dateStr)return{dateSet:false,candidates:[]};
+  const horizonDays=horizonDaysUntil(dateStr);
+  const candidates=[];
+  eligibleForecastItems().forEach(item=>{
+    const forecast=forecastFor(item);
+    if(forecast.status==='unknown')return;
+    let probabilityInfo=null;
+    if(horizonDays!=null&&horizonDays<=NEXT_SHOPPING_HORIZON_MAX_DAYS){
+      probabilityInfo=stockoutProbabilityForHorizon(forecast,buildDailyConsumptionSeries(item.id),horizonDays);
+    }
+    const rec=nextShoppingRecommendation(item,forecast,probabilityInfo);
+    if(rec.level==='high'||rec.level==='medium'||rec.level==='check')candidates.push({item,forecast,rec});
+  });
+  // 表示順：1) 確率が高い順、2) 履歴不足だが残り日数が短い商品（末尾、残り日数の短い順）
+  candidates.sort((a,b)=>{
+    const aHasProb=a.rec.probability!=null,bHasProb=b.rec.probability!=null;
+    if(aHasProb&&bHasProb)return b.rec.probability-a.rec.probability;
+    if(aHasProb!==bHasProb)return aHasProb?-1:1;
+    return(a.forecast.daysLeft??Infinity)-(b.forecast.daysLeft??Infinity);
+  });
+  return{dateSet:true,dateStr,candidates};
+}
+const NEXT_SHOPPING_RECOMMEND_META={
+  high:{icon:'🔴',label:'優先して購入候補'},
+  medium:{icon:'🟠',label:'購入を検討'},
+  check:{icon:'⚪',label:'履歴不足だが残り日数が短いため要確認'},
+};
+function renderNextShoppingCandidates(){
+  const{dateSet,dateStr,candidates}=buildNextShoppingCandidates();
+  const container=$('next-shopping-candidates-list');
+  if(!dateSet){
+    container.innerHTML='<div class="empty">次回買い物予定日を設定すると購入候補を表示できます</div>';
+    return;
+  }
+  const d=new Date(dateStr+'T00:00:00+09:00'),dateLabel=`${d.getMonth()+1}月${d.getDate()}日`;
+  if(candidates.length===0){
+    container.innerHTML=`<p class="muted">次回買い物：${esc(dateLabel)}</p><div class="empty">候補になる商品は見当たりません</div>`;
+    return;
+  }
+  const rows=candidates.map(({item,rec})=>{
+    const meta=NEXT_SHOPPING_RECOMMEND_META[rec.level];
+    const probText=rec.probability!=null?`買い物日までに切れる確率 ${esc(Math.round(rec.probability*100))}%`:'確率データ不足';
+    return`<article class="list-card"><h3>${meta.icon} ${esc(item.productName||'名称未設定')}</h3><div class="meta"><span>${probText}</span></div><div class="item-actions">${addToShoppingActionHtml(item)}</div></article>`;
+  }).join('');
+  container.innerHTML=`<p class="muted">次回買い物：${esc(dateLabel)}</p>${rows}`;
+}
+
+function renderAll(){const c=counts(state);$('shopping-count').textContent=c.shopping;$('inventory-count').textContent=c.inventory;$('belongings-count').textContent=c.belongings;const integrated=!!readJson(KEYS.integrated);$('sync-badge').textContent=integrated?'利用中':'未統合';$('sync-badge').classList.toggle('ok',integrated);renderNextShoppingCandidates();renderStockCheck();renderToday();renderShopping();renderInventory();renderBelongingFilters();renderBelongings();renderSettings()}
 function renderToday(){const shopping=array(state.shopping.shoppingList).slice(0,5),unknown=array(state.shopping.inventory).filter(i=>i.confirmedQuantity==null).slice(0,3);const rows=[...shopping.map(i=>({label:i.productName||'名称未設定',meta:`買うもの${i.plannedQuantity!=null?`・${i.plannedQuantity}${i.unit||''}`:''}`})),...unknown.map(i=>({label:i.productName||'名称未設定',meta:'在庫数を確認'}))];$('today-summary').innerHTML=rows.length?rows.map(r=>`<div class="summary-row"><strong>${esc(r.label)}</strong><span>${esc(r.meta)}</span></div>`).join(''):'<div class="empty">今日確認する候補はありません</div>'}
 function renderShopping(){const all=array(state.shopping.shoppingList),q=norm($('shopping-search')?.value||'');let items=all.filter(i=>!q||norm([i.productName,i.note,i.unit].join(' ')).includes(q));items=sortShopping(items);$('shopping-list').innerHTML=items.length?items.map(i=>`<article class="list-card"><h3>${esc(i.productName||'名称未設定')}</h3><div class="meta"><span>${i.plannedQuantity!=null?`予定 ${esc(i.plannedQuantity)}${esc(i.unit||'')}`:'数量未設定'}</span>${i.note?`<span>${esc(i.note)}</span>`:''}</div><div class="item-actions"><button class="primary-small" data-action="buy-inventory" data-id="${esc(i.id)}">購入→在庫</button><button data-action="buy-belonging" data-id="${esc(i.id)}">購入→持ち物</button><button class="danger-small" data-action="delete-shopping" data-id="${esc(i.id)}">削除</button></div></article>`).join(''):`<div class="empty">${all.length?'該当する買うものはありません':'買い物リストは空です'}</div>`}
 // 「使用」ボタンはconfirmedQuantityが確定している商品にのみ表示する。
@@ -531,7 +611,7 @@ async function syncToSheets(){
 
 document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>showView(t.dataset.view)));document.querySelectorAll('[data-go]').forEach(t=>t.addEventListener('click',()=>showView(t.dataset.go)));
 $('global-search').addEventListener('input',globalSearch);$('shopping-search').addEventListener('input',renderShopping);$('shopping-sort').addEventListener('change',renderShopping);$('inventory-search').addEventListener('input',renderInventory);$('inventory-sort').addEventListener('change',renderInventory);$('belongings-search').addEventListener('input',renderBelongings);$('belongings-category').addEventListener('change',renderBelongings);$('belongings-location').addEventListener('change',renderBelongings);$('belongings-sort').addEventListener('change',renderBelongings);
-$('shopping-list').addEventListener('click',handleListAction);$('inventory-list').addEventListener('click',handleListAction);$('belongings-list').addEventListener('click',handleListAction);$('stock-check-list').addEventListener('click',handleListAction);
+$('shopping-list').addEventListener('click',handleListAction);$('inventory-list').addEventListener('click',handleListAction);$('belongings-list').addEventListener('click',handleListAction);$('stock-check-list').addEventListener('click',handleListAction);$('next-shopping-candidates-list').addEventListener('click',handleListAction);
 $('add-shopping-btn').addEventListener('click',addShopping);$('add-inventory-btn').addEventListener('click',()=>openInventoryModal());$('add-belonging-btn').addEventListener('click',()=>openBelongingModal());$('home-add-belonging').addEventListener('click',()=>openBelongingModal());
 $('belonging-cancel').addEventListener('click',closeBelongingModal);$('belonging-save').addEventListener('click',saveBelonging);$('belonging-inventory-link').addEventListener('change',updateBelongingNewStockUI);$('inventory-cancel').addEventListener('click',closeInventoryModal);$('inventory-save').addEventListener('click',saveInventory);$('stock-prompt-skip').addEventListener('click',closeStockPrompt);$('stock-prompt-add').addEventListener('click',confirmStockPromptAdd);$('purchase-qty-cancel').addEventListener('click',closePurchaseQtyModal);$('purchase-qty-confirm').addEventListener('click',confirmPurchaseQty);$('use-inventory-cancel').addEventListener('click',closeUseInventoryModal);$('use-inventory-confirm').addEventListener('click',confirmUseInventory);$('home-add-shopping-cancel').addEventListener('click',closeHomeAddShoppingModal);$('home-add-shopping-confirm').addEventListener('click',confirmHomeAddShopping);$('sheets-sync-config-save').addEventListener('click',saveSheetsSyncConfig);$('sheets-sync-btn').addEventListener('click',syncToSheets);$('sheets-auto-sync-toggle').addEventListener('change',toggleSheetsAutoSync);$('next-shopping-date-save').addEventListener('click',saveNextShoppingDate);
 $('migration-confirm').addEventListener('click',importSources);$('migration-later').addEventListener('click',()=>$('migration-modal').hidden=true);
