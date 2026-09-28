@@ -44,8 +44,12 @@ function sortBelongings(items){const mode=$('belongings-sort')?.value||'created'
 
 // ---- 在庫予測（表示専用） ----
 // 確定在庫(confirmedQuantity)・最終確認日(lastConfirmedDate)は、ここでは一切書き換えない。
-// 使用ペースは既存の shopping.consumptionRates（旧かいもの帖から移行時に引き継がれるフィールド）を
-// そのまま使う。新しい保存フィールドは追加しない。存在しない場合は「使用ペース未設定」として扱う。
+// 使用ペースは shopping.consumptionRates から商品ごとに次の優先順で選ぶ：
+//   1. 在庫確認区間から求めた実測ペース（source:'stockInterval'）→「実測予測」
+//   2. 1がまだ無く、既存のquantityPerDay>0がある（使用記録・旧かいもの帖由来）→「暫定予測」
+//   3. どちらも無い → 推測せず「予測データ不足」
+// 既存ペースは削除・初期化しない。有効な在庫確認区間ができた時点で、その商品の
+// quantityPerDayがstockInterval由来へ置き換わる（recalcStockIntervalRate参照）。
 // 旧かいもの帖の実コードを確認したところ、restockAtRemainingUses.max は「残り使用回数」という
 // 独立した換算値ではなく、推定残量（confirmedQuantityと同じ単位の生の数量）にそのまま比較される
 // 閾値だった： i<=t.thresholds.restockAtRemainingUses.max ? 'buy' : ...
@@ -61,27 +65,50 @@ const FORECAST_HOME_LIMIT=6;
 const daysBetween=(a,b)=>{if(!a||!b)return null;const d1=new Date(a+'T00:00:00+09:00'),d2=new Date(b+'T00:00:00+09:00');return Math.round((d2-d1)/86400000)};
 function forecastThresholds(){const t=state.shopping.thresholds;return{restockAtRemainingUses:{max:t?.restockAtRemainingUses?.max??FORECAST_DEFAULT_THRESHOLDS.restockAtRemainingUses.max},buyForSafety:{daysUntilEmptyMax:t?.buyForSafety?.daysUntilEmptyMax??FORECAST_DEFAULT_THRESHOLDS.buyForSafety.daysUntilEmptyMax},buyToday:{unknownRateConfirmedInventoryBelow:t?.buyToday?.unknownRateConfirmedInventoryBelow??FORECAST_DEFAULT_THRESHOLDS.buyToday.unknownRateConfirmedInventoryBelow}}}
 function forecastRateFor(item){return array(state.shopping.consumptionRates).find(r=>r.inventoryId===item.id)||null}
-// 最終確認日より後に記録された、同じ商品名の購入履歴を加算する（購入を挟んでも見落とさない）
-function forecastRecentPurchases(item){if(!item.lastConfirmedDate)return 0;return array(state.shopping.purchaseLog).filter(p=>p.date>item.lastConfirmedDate&&norm(p.productName)===norm(item.productName)).reduce((sum,p)=>sum+(Number(p.quantity)||0),0)}
-// 推定在庫 = 最終確認数量 + 確認後の購入数量 - 経過日数×1日あたり使用量（0未満にはしない・確定値は変更しない）
+function stockIntervalRateFor(item){const rate=forecastRateFor(item);return rate&&rate.source===STOCK_INTERVAL_SOURCE&&Number.isFinite(Number(rate.quantityPerDay))?rate:null}
+// 予測に使うペースと種別（measured=実測／provisional=暫定）。どちらも無ければnull。
+function forecastRateSelection(item){
+  const measured=stockIntervalRateFor(item);
+  if(measured)return{rate:measured,mode:'measured'};
+  const existing=forecastRateFor(item);
+  if(existing&&Number(existing.quantityPerDay)>0)return{rate:existing,mode:'provisional'};
+  return null;
+}
+function lastStockCount(inventoryId){const counts=stockEventsFor(inventoryId).filter(e=>e.type==='count');return counts.length?counts[counts.length-1]:null}
+// 予測できるようになるまでに必要な在庫確認の回数。
+// 確認なし→2回、確認後に数量修正あり→2回（修正で区間が切れるため）、それ以外→1回。
+function stockCountsNeeded(inventoryId){const last=lastStockCount(inventoryId);if(!last)return 2;return stockEventsFor(inventoryId).some(e=>e.type==='correction'&&e.createdAt>last.createdAt)?2:1}
+const dateAfter=days=>{const d=new Date();d.setDate(d.getDate()+days);const pad=n=>String(n).padStart(2,'0');return`${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`};
+// 推定在庫 = 確定在庫 − max(0, 起点からの経過日数×ペース − 起点以降の明示使用量)
+// 起点は最終の「在庫確認」。まだ一度も在庫確認していない商品（暫定予測のみ）は、
+// 従来どおり最終更新日(lastConfirmedDate)を起点とし、明示使用量は0とする
+// （使用・購入のたびにlastConfirmedDateが当日へ更新され、確定在庫にも反映済みのため）。
+// ・確定在庫(confirmedQuantity)は「使用」「購入」で増減済みの記録上の在庫。購入は加算済みなので、ここで
+//   購入履歴を足し直すことはしない（旧forecastRecentPurchases()は廃止）。
+// ・明示使用量は実消費の下限。経過日数×ペースの見込み消費のうち、使用ボタンで記録済みの分は
+//   確定在庫からすでに引かれているので、残り（記録されていない見込み分）だけを引く。
+//   → 使用を細かく記録してもしなくても、実消費がペースどおりなら同じ推定値になる。
+// 確定値は一切書き換えない（表示専用）。
 function forecastFor(item){
-  if(item.confirmedQuantity==null||!item.lastConfirmedDate)return{status:'unknown',reason:'no-baseline'};
-  const rate=forecastRateFor(item);
-  if(!rate||!(Number(rate.quantityPerDay)>0)){
-    // 使用ペース不明：修正1の指示どおり、赤・黄へは格上げせず一律「⚪ 一度在庫を確認」として扱う。
-    // buyToday.unknownRateConfirmedInventoryBelow は在庫確認後プロンプト側でのみ使う（下記参照）。
-    return{status:'unknown',reason:'no-rate',confirmedQuantity:item.confirmedQuantity,lastConfirmedDate:item.lastConfirmedDate};
-  }
-  const elapsed=daysBetween(item.lastConfirmedDate,today())??0;
-  const purchased=forecastRecentPurchases(item);
-  let estimate=item.confirmedQuantity+purchased-elapsed*rate.quantityPerDay;
-  if(estimate<0)estimate=0;
-  const daysLeft=estimate/rate.quantityPerDay;
+  if(item.confirmedQuantity==null)return{status:'unknown',reason:'no-baseline'};
+  const lastCount=lastStockCount(item.id),selection=forecastRateSelection(item),countsNeeded=stockCountsNeeded(item.id);
+  const baseDate=lastCount?lastCount.date:item.lastConfirmedDate;
+  if(!selection||!baseDate)return{status:'unknown',reason:'need-count',countsNeeded,confirmedQuantity:item.confirmedQuantity,lastConfirmedDate:item.lastConfirmedDate};
+  const{rate,mode}=selection;
+  const perDay=Number(rate.quantityPerDay);
+  const elapsed=Math.max(0,daysBetween(baseDate,today())??0);
+  const explicitUse=lastCount?stockEventsFor(item.id).filter(e=>e.type==='use'&&e.createdAt>lastCount.createdAt).reduce((s,e)=>s+(Number(e.beforeQuantity)||0)-(Number(e.afterQuantity)||0),0):0;
+  const unloggedExpected=Math.max(0,elapsed*perDay-explicitUse);
+  const estimate=Math.max(0,Number(item.confirmedQuantity)-unloggedExpected);
+  const base={mode,countsNeeded,estimate,elapsed,explicitUse,rate,lowConfidence:mode==='measured'&&!!rate.lowConfidence,lastCountDate:lastCount?.date??null,lastCountQuantity:lastCount?.afterQuantity??null,confirmedQuantity:item.confirmedQuantity,lastConfirmedDate:item.lastConfirmedDate};
+  // 直近の確認期間で消費がない商品：在庫切れ日は出さず「当面余裕あり」とする。
+  if(!(perDay>0))return{status:'ok',daysLeft:Infinity,stockoutDate:null,noConsumption:true,...base};
+  const daysLeft=estimate/perDay;
   const th=forecastThresholds();
   let status='ok';
   if(estimate<=th.restockAtRemainingUses.max)status='red';
   else if(daysLeft<=th.buyForSafety.daysUntilEmptyMax||(FORECAST_STALE_JUDGEMENT_ENABLED&&elapsed>=FORECAST_STALE_DAYS))status='amber';
-  return{status,estimate,daysLeft,elapsed,purchased,rate,confirmedQuantity:item.confirmedQuantity,lastConfirmedDate:item.lastConfirmedDate};
+  return{status,daysLeft,stockoutDate:dateAfter(Math.floor(daysLeft)),...base};
 }
 function eligibleForecastItems(){return array(state.shopping.inventory).filter(i=>!FORECAST_EXCLUDED_CATEGORIES.includes(i.category))}
 // ---- 在庫切れ予測（表示区分。購入提案のしきい値=forecast.statusとは完全に別物） ----
@@ -227,19 +254,33 @@ function nextShoppingProbabilityLine(item,forecast,dailySeriesInfo){
   }
   return`<span>次回買い物：${esc(dateLabel)}</span><span>${detail}</span>`;
 }
+const monthDayLabel=dateStr=>{const d=new Date(dateStr+'T00:00:00+09:00');return`${d.getMonth()+1}月${d.getDate()}日`};
+function stockCountsNeededText(forecast){
+  if(forecast.countsNeeded===1)return'あと1回在庫確認すると予測できます';
+  return'「在庫を確認」で実際の数量を2回記録すると予測できます';
+}
 function forecastCardHtml(item,forecast,prediction){
   let metaHtml;
+  const unit=esc(item.unit||'');
   if(forecast.status==='unknown'){
     metaHtml=forecast.reason==='no-baseline'
-      ?`<span>確定在庫の記録がありません</span>`
-      :`<span>確定 ${esc(item.confirmedQuantity)}${esc(item.unit||'')}${item.lastConfirmedDate?`（${esc(item.lastConfirmedDate)}確認）`:''}</span><span>使用ペース未設定</span>`;
+      ?`<span>確定在庫の記録がありません</span><span>${esc(stockCountsNeededText({countsNeeded:2}))}</span>`
+      :`<span>記録上の在庫 ${esc(item.confirmedQuantity)}${unit}</span><span>消費データ不足</span><span>${esc(stockCountsNeededText(forecast))}</span>`;
   }else{
     const roundedEstimate=Math.round((forecast.estimate??0)*10)/10;
-    const roundedDaysLeft=Math.round((forecast.daysLeft??0)*10)/10;
-    const rateText=forecast.rate?`${forecast.rate.quantityPerDay}${forecast.rate.unit||item.unit||''}/日`:'';
+    const perDay=Math.round(Number(forecast.rate.quantityPerDay)*100)/100;
+    const modeHtml=forecast.mode==='measured'
+      ?`<span>実測予測（${esc(forecast.rate.intervalCount)}区間・${esc(forecast.rate.observedDays)}日分）${forecast.lowConfidence?'・精度：低':''}</span>`
+      :`<span>暫定予測（これまでの使用ペース）</span><span>在庫確認をあと${esc(forecast.countsNeeded)}回行うと実測予測へ更新</span>`;
+    const baseHtml=forecast.lastCountDate
+      ?`<span>最終在庫確認 ${esc(monthDayLabel(forecast.lastCountDate))}：${esc(forecast.lastCountQuantity)}${unit}</span>`
+      :`<span>確定 ${esc(item.confirmedQuantity)}${unit}（${esc(monthDayLabel(forecast.lastConfirmedDate))}更新）</span>`;
     // 3日確率・買い物日までの確率の両方で同じ日別系列を使い回す（二重計算・二重ロードを避ける）。
     const dailySeriesInfo=buildDailyConsumptionSeries(item.id);
-    metaHtml=`<span>確定 ${esc(item.confirmedQuantity)}${esc(item.unit||'')}（${esc(item.lastConfirmedDate)}確認）</span><span>推定在庫 約${esc(roundedEstimate)}${esc(item.unit||'')}</span>${rateText?`<span>使用ペース ${esc(rateText)}</span>`:''}<span>残り 約${esc(roundedDaysLeft)}日</span>${stockoutProbabilityLine(item,forecast,dailySeriesInfo)}${nextShoppingProbabilityLine(item,forecast,dailySeriesInfo)}`;
+    const outlook=forecast.noConsumption
+      ?`<span>直近の確認期間では消費がありません</span>`
+      :`<span>残り 約${esc(Math.round(forecast.daysLeft*10)/10)}日</span><span>在庫切れ予想 ${esc(monthDayLabel(forecast.stockoutDate))}ごろ</span>`;
+    metaHtml=`<span>現在在庫 約${esc(roundedEstimate)}${unit}（推定）</span>${baseHtml}<span>平均消費 ${esc(perDay)}${unit}/日</span>${modeHtml}${outlook}${stockoutProbabilityLine(item,forecast,dailySeriesInfo)}${nextShoppingProbabilityLine(item,forecast,dailySeriesInfo)}`;
   }
   return`<article class="list-card forecast-card forecast-${prediction.category}"><h3>${esc(item.productName||'名称未設定')}</h3><div class="forecast-badge">${prediction.icon} ${esc(prediction.label)}</div><div class="meta">${metaHtml}</div><div class="item-actions"><button class="primary-small" data-action="check-stock" data-id="${esc(item.id)}">在庫を確認</button>${homeAddToShoppingButtonHtml(item,forecast)}</div></article>`;
 }
@@ -350,7 +391,7 @@ function renderToday(){const shopping=array(state.shopping.shoppingList).slice(0
 function renderShopping(){const all=array(state.shopping.shoppingList),q=norm($('shopping-search')?.value||'');let items=all.filter(i=>!q||norm([i.productName,i.note,i.unit].join(' ')).includes(q));items=sortShopping(items);$('shopping-list').innerHTML=items.length?items.map(i=>`<article class="list-card"><h3>${esc(i.productName||'名称未設定')}</h3><div class="meta"><span>${i.plannedQuantity!=null?`予定 ${esc(i.plannedQuantity)}${esc(i.unit||'')}`:'数量未設定'}</span>${i.note?`<span>${esc(i.note)}</span>`:''}</div><div class="item-actions"><button class="primary-small" data-action="buy-inventory" data-id="${esc(i.id)}">購入→在庫</button><button data-action="buy-belonging" data-id="${esc(i.id)}">購入→持ち物</button><button class="danger-small" data-action="delete-shopping" data-id="${esc(i.id)}">削除</button></div></article>`).join(''):`<div class="empty">${all.length?'該当する買うものはありません':'買い物リストは空です'}</div>`}
 // 「使用」ボタンはconfirmedQuantityが確定している商品にのみ表示する。
 // 未確認（null）の商品から推測で減算することを防ぐため。
-function renderInventory(){const q=norm($('inventory-search').value);let items=array(state.shopping.inventory).filter(i=>!q||norm([i.productName,i.note,i.category].join(' ')).includes(q));items=sortInventory(items);$('inventory-list').innerHTML=items.length?items.map(i=>`<article class="list-card"><h3>${esc(i.productName||'名称未設定')}</h3><div class="meta"><span class="pill">${i.confirmedQuantity==null?'要確認':`${esc(i.confirmedQuantity)}${esc(i.unit||'')}`}</span>${i.lastConfirmedDate?`<span>確認 ${esc(i.lastConfirmedDate)}</span>`:''}${i.note?`<span>${esc(i.note)}</span>`:''}</div><div class="item-actions">${i.confirmedQuantity!=null?`<button class="primary-small" data-action="use-inventory" data-id="${esc(i.id)}">使用</button>`:''}<button data-action="check-stock" data-id="${esc(i.id)}">在庫を確認</button><button data-action="edit-inventory" data-id="${esc(i.id)}">数量・商品を編集</button><button class="danger-small" data-action="delete-inventory" data-id="${esc(i.id)}">削除</button></div></article>`).join(''):'<div class="empty">該当する在庫はありません</div>'}
+function renderInventory(){const q=norm($('inventory-search').value);let items=array(state.shopping.inventory).filter(i=>!q||norm([i.productName,i.note,i.category].join(' ')).includes(q));items=sortInventory(items);$('inventory-list').innerHTML=items.length?items.map(i=>`<article class="list-card"><h3>${esc(i.productName||'名称未設定')}</h3><div class="meta"><span class="pill">${i.confirmedQuantity==null?'要確認':`${esc(i.confirmedQuantity)}${esc(i.unit||'')}`}</span>${i.lastConfirmedDate?`<span>更新 ${esc(i.lastConfirmedDate)}</span>`:''}${(c=>c?`<span>在庫確認 ${esc(c.date)}</span>`:'')(lastStockCount(i.id))}${i.note?`<span>${esc(i.note)}</span>`:''}</div><div class="item-actions">${i.confirmedQuantity!=null?`<button class="primary-small" data-action="use-inventory" data-id="${esc(i.id)}">使用</button>`:''}<button data-action="check-stock" data-id="${esc(i.id)}">在庫を確認</button><button data-action="edit-inventory" data-id="${esc(i.id)}">数量・商品を編集</button><button class="danger-small" data-action="delete-inventory" data-id="${esc(i.id)}">削除</button></div></article>`).join(''):'<div class="empty">該当する在庫はありません</div>'}
 function renderBelongingFilters(){const items=array(state.belongings),category=$('belongings-category'),location=$('belongings-location'),cv=category.value,lv=location.value;const cats=[...new Set(items.map(i=>i.category).filter(Boolean))].sort(),locs=[...new Set(items.map(i=>i.location).filter(Boolean))].sort();category.innerHTML='<option value="">すべてのカテゴリ</option>'+cats.map(v=>`<option value="${esc(v)}">${esc(v)}</option>`).join('');location.innerHTML='<option value="">すべての場所</option>'+locs.map(v=>`<option value="${esc(v)}">${esc(v)}</option>`).join('');category.value=cats.includes(cv)?cv:'';location.value=locs.includes(lv)?lv:'';$('location-options').innerHTML=locs.map(v=>`<option value="${esc(v)}"></option>`).join('')}
 // 現在在庫はinventoryItemIdが設定されている持ち物だけ表示する。数量・単位は
 // 常にinventory側を参照して都度計算し、持ち物側には数量を一切保存しない。
@@ -487,7 +528,8 @@ function computeStockRate(inventoryId){
   return{quantityPerDay:Math.max(0,totalConsumed)/observedDays,intervalCount:used.length,observedDays,totalConsumed,lowConfidence:used.length<STOCK_RATE_MIN_INTERVALS||observedDays<STOCK_RATE_MIN_OBSERVED_DAYS,windowFrom:used[used.length-1].from,windowTo:used[0].to};
 }
 // 在庫確認のたびに呼び、結果をconsumptionRates[].quantityPerDayへ保存する。
-// 有効区間がまだ無い場合は何も書き換えない（推測値を作らない）。
+// 有効区間がまだ無い場合は何も書き換えない（推測値を作らず、既存ペースもそのまま暫定予測に残す）。
+// 既存ペースから初めて切り替えるときは、元の値をreplacedQuantityPerDay/replacedSourceとして残す。
 function recalcStockIntervalRate(inventoryId){
   const item=state.shopping.inventory.find(i=>i.id===inventoryId);
   if(!item)return;
@@ -495,6 +537,8 @@ function recalcStockIntervalRate(inventoryId){
   if(!rate)return;
   const rateValues={inventoryId,productName:item.productName,quantityPerDay:rate.quantityPerDay,unit:item.unit||null,updatedAt:nowIso(),source:STOCK_INTERVAL_SOURCE,intervalCount:rate.intervalCount,observedDays:rate.observedDays,lowConfidence:rate.lowConfidence};
   const existingIndex=state.shopping.consumptionRates.findIndex(r=>r.inventoryId===inventoryId);
+  const existing=existingIndex>=0?state.shopping.consumptionRates[existingIndex]:null;
+  if(existing&&existing.source!==STOCK_INTERVAL_SOURCE){rateValues.replacedQuantityPerDay=existing.quantityPerDay??null;rateValues.replacedSource=existing.source??null}
   if(existingIndex>=0)state.shopping.consumptionRates[existingIndex]={...state.shopping.consumptionRates[existingIndex],...rateValues};
   else state.shopping.consumptionRates.push(rateValues);
   markSheetsDirty();
