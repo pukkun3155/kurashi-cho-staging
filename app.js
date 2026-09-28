@@ -416,6 +416,85 @@ function recalcConsumptionRate(inventoryId){
   const dailyRate=totalQty/elapsedDays;
   const rateValues={inventoryId,quantityPerDay:dailyRate,unit:item.unit||null,updatedAt:nowIso(),source:'consumptionLog'};
   const existingIndex=state.shopping.consumptionRates.findIndex(r=>r.inventoryId===inventoryId);
+  // 在庫確認区間から求めた実測ペースは、使用記録だけのペースで上書きしない
+  // （使用記録は実消費の一部しか含まない可能性があるため）。
+  if(existingIndex>=0&&state.shopping.consumptionRates[existingIndex].source===STOCK_INTERVAL_SOURCE)return;
+  if(existingIndex>=0)state.shopping.consumptionRates[existingIndex]={...state.shopping.consumptionRates[existingIndex],...rateValues};
+  else state.shopping.consumptionRates.push(rateValues);
+  markSheetsDirty();
+}
+
+// ---- 在庫確認区間からの消費量・使用ペース ----
+// 区間＝ある「在庫確認(count)」から次の「在庫確認」まで。区間内の推定消費量は
+//   前回確認数量 ＋ 区間内の購入量 − 今回確認数量
+// で求める。「使用」ボタンの記録は、今回確認時の記録上の在庫（beforeQuantity）に
+// すでに反映されているため、ここへ使用量を足すことはしない（二重計上しない）。
+// 内訳として「明示使用量」と「記録外の消費（記録上の在庫−実数）」を分けて持つが、合計は常に上の式と一致する。
+// 次の区間は学習に使わない（invalidReasonを付けて残す）：
+//   correction … 区間内に数量・単位の修正がある（修正量を消費として学習しない）
+//   unit-changed / book-mismatch … 単位の変化、または記録にない在庫変動がある
+//   negative   … 消費量がマイナス（購入の記録漏れなどの可能性）
+// 同じ日のうちに再確認した場合は区間を作らず、後の確認を新しい起点に置き換える（1日未満の区間は作らない）。
+const STOCK_INTERVAL_SOURCE='stockInterval';
+const STOCK_RATE_PRIMARY_WINDOW_DAYS=60;
+const STOCK_RATE_EXTENDED_WINDOW_DAYS=120;
+const STOCK_RATE_MIN_INTERVALS=2;
+const STOCK_RATE_MIN_OBSERVED_DAYS=14;
+const STOCK_RATE_MAX_INTERVALS=5;
+const STOCK_EPSILON=1e-6;
+function stockEventsFor(inventoryId){
+  return array(state.shopping.inventoryLog).filter(l=>l.inventoryId===inventoryId&&l.type&&l.createdAt).slice().sort((a,b)=>a.createdAt.localeCompare(b.createdAt));
+}
+function computeStockIntervals(inventoryId){
+  const intervals=[];
+  let anchor=null,purchased=0,used=0,corrected=false,unitChanged=false;
+  stockEventsFor(inventoryId).forEach(e=>{
+    if(e.type==='purchase')purchased+=(Number(e.afterQuantity)||0)-(Number(e.beforeQuantity)||0);
+    else if(e.type==='use')used+=(Number(e.beforeQuantity)||0)-(Number(e.afterQuantity)||0);
+    else if(e.type==='correction'){corrected=true;if(e.beforeUnit!==undefined)unitChanged=true}
+    if(e.type!=='count')return;
+    const days=anchor?daysBetween(anchor.date,e.date):null;
+    if(anchor&&days>=1){
+      const start=Number(anchor.afterQuantity),end=Number(e.afterQuantity);
+      const consumed=start+purchased-end;
+      const book=start+purchased-used;
+      let invalidReason=null;
+      if(corrected)invalidReason='correction';
+      else if(unitChanged||(anchor.unit||'')!==(e.unit||''))invalidReason='unit-changed';
+      else if(e.beforeQuantity==null||Math.abs(Number(e.beforeQuantity)-book)>STOCK_EPSILON)invalidReason='book-mismatch';
+      else if(consumed<-STOCK_EPSILON)invalidReason='negative';
+      intervals.push({from:anchor.date,to:e.date,days,startQuantity:start,endQuantity:end,purchased,explicitUse:used,unlogged:consumed-used,consumed,unit:e.unit||'',valid:!invalidReason,invalidReason});
+    }
+    anchor=e;purchased=0;used=0;corrected=false;unitChanged=false;
+  });
+  return intervals;
+}
+// 使用ペース＝対象区間の消費量合計÷対象区間の日数合計（区間ごとのペースの平均ではない）。
+// 対象区間：終了日が直近60日以内の有効区間。2区間以上かつ合計14日以上にならない場合は、
+// 直近120日以内の有効区間を新しい順に最大5区間までさかのぼる。
+function computeStockRate(inventoryId){
+  const valid=computeStockIntervals(inventoryId).filter(i=>i.valid&&i.days>=1).sort((a,b)=>b.to.localeCompare(a.to));
+  if(!valid.length)return null;
+  const within=days=>valid.filter(i=>daysBetween(i.to,today())<=days);
+  let used=within(STOCK_RATE_PRIMARY_WINDOW_DAYS);
+  const sumDays=list=>list.reduce((s,i)=>s+i.days,0);
+  if(used.length<STOCK_RATE_MIN_INTERVALS||sumDays(used)<STOCK_RATE_MIN_OBSERVED_DAYS){
+    const extended=within(STOCK_RATE_EXTENDED_WINDOW_DAYS).slice(0,STOCK_RATE_MAX_INTERVALS);
+    if(extended.length>used.length)used=extended;
+  }
+  if(!used.length)return null;
+  const observedDays=sumDays(used),totalConsumed=used.reduce((s,i)=>s+i.consumed,0);
+  return{quantityPerDay:Math.max(0,totalConsumed)/observedDays,intervalCount:used.length,observedDays,totalConsumed,lowConfidence:used.length<STOCK_RATE_MIN_INTERVALS||observedDays<STOCK_RATE_MIN_OBSERVED_DAYS,windowFrom:used[used.length-1].from,windowTo:used[0].to};
+}
+// 在庫確認のたびに呼び、結果をconsumptionRates[].quantityPerDayへ保存する。
+// 有効区間がまだ無い場合は何も書き換えない（推測値を作らない）。
+function recalcStockIntervalRate(inventoryId){
+  const item=state.shopping.inventory.find(i=>i.id===inventoryId);
+  if(!item)return;
+  const rate=computeStockRate(inventoryId);
+  if(!rate)return;
+  const rateValues={inventoryId,productName:item.productName,quantityPerDay:rate.quantityPerDay,unit:item.unit||null,updatedAt:nowIso(),source:STOCK_INTERVAL_SOURCE,intervalCount:rate.intervalCount,observedDays:rate.observedDays,lowConfidence:rate.lowConfidence};
+  const existingIndex=state.shopping.consumptionRates.findIndex(r=>r.inventoryId===inventoryId);
   if(existingIndex>=0)state.shopping.consumptionRates[existingIndex]={...state.shopping.consumptionRates[existingIndex],...rateValues};
   else state.shopping.consumptionRates.push(rateValues);
   markSheetsDirty();
@@ -523,6 +602,7 @@ function confirmStockCount(){
   item.confirmedQuantity=qty;
   item.lastConfirmedDate=today();
   logStockEvent(item,'count',before,qty);
+  recalcStockIntervalRate(item.id);
   markSheetsDirty();
   closeStockCountModal();
   persist('在庫確認を記録しました');
