@@ -4,7 +4,9 @@ const KEYS={integrated:'kurashi-cho-v1',backup:'kurashi-cho-v1.backup-before-sou
 // shopping.consumptionLogという新しい永続配列を追加したため、
 // 後方互換のあるマイナー加算としてインクリメントする（validIntegrated側は
 // 値の一致を検査しないため、既存データの読み込みには影響しない）。
-const VERSION='1.3.0';
+// 1.4.0：shopping.inventoryLogへの記録を再開し、type（count/correction/use/purchase/create）と
+// createdAtを持つ新形式の記録を追加。purchaseLogにはinventoryIdを保存する。いずれも項目の追加のみ。
+const VERSION='1.4.0';
 const CATEGORIES=['その他','衣類','書類','工具','季節用品','食品','家電','日用品'];
 let state=null,toastTimer=null,belongingEditId=null,inventoryEditId=null,purchaseShoppingId=null;
 const $=id=>document.getElementById(id);
@@ -348,7 +350,7 @@ function renderToday(){const shopping=array(state.shopping.shoppingList).slice(0
 function renderShopping(){const all=array(state.shopping.shoppingList),q=norm($('shopping-search')?.value||'');let items=all.filter(i=>!q||norm([i.productName,i.note,i.unit].join(' ')).includes(q));items=sortShopping(items);$('shopping-list').innerHTML=items.length?items.map(i=>`<article class="list-card"><h3>${esc(i.productName||'名称未設定')}</h3><div class="meta"><span>${i.plannedQuantity!=null?`予定 ${esc(i.plannedQuantity)}${esc(i.unit||'')}`:'数量未設定'}</span>${i.note?`<span>${esc(i.note)}</span>`:''}</div><div class="item-actions"><button class="primary-small" data-action="buy-inventory" data-id="${esc(i.id)}">購入→在庫</button><button data-action="buy-belonging" data-id="${esc(i.id)}">購入→持ち物</button><button class="danger-small" data-action="delete-shopping" data-id="${esc(i.id)}">削除</button></div></article>`).join(''):`<div class="empty">${all.length?'該当する買うものはありません':'買い物リストは空です'}</div>`}
 // 「使用」ボタンはconfirmedQuantityが確定している商品にのみ表示する。
 // 未確認（null）の商品から推測で減算することを防ぐため。
-function renderInventory(){const q=norm($('inventory-search').value);let items=array(state.shopping.inventory).filter(i=>!q||norm([i.productName,i.note,i.category].join(' ')).includes(q));items=sortInventory(items);$('inventory-list').innerHTML=items.length?items.map(i=>`<article class="list-card"><h3>${esc(i.productName||'名称未設定')}</h3><div class="meta"><span class="pill">${i.confirmedQuantity==null?'要確認':`${esc(i.confirmedQuantity)}${esc(i.unit||'')}`}</span>${i.lastConfirmedDate?`<span>確認 ${esc(i.lastConfirmedDate)}</span>`:''}${i.note?`<span>${esc(i.note)}</span>`:''}</div><div class="item-actions">${i.confirmedQuantity!=null?`<button class="primary-small" data-action="use-inventory" data-id="${esc(i.id)}">使用</button>`:''}<button data-action="edit-inventory" data-id="${esc(i.id)}">数量・商品を編集</button><button class="danger-small" data-action="delete-inventory" data-id="${esc(i.id)}">削除</button></div></article>`).join(''):'<div class="empty">該当する在庫はありません</div>'}
+function renderInventory(){const q=norm($('inventory-search').value);let items=array(state.shopping.inventory).filter(i=>!q||norm([i.productName,i.note,i.category].join(' ')).includes(q));items=sortInventory(items);$('inventory-list').innerHTML=items.length?items.map(i=>`<article class="list-card"><h3>${esc(i.productName||'名称未設定')}</h3><div class="meta"><span class="pill">${i.confirmedQuantity==null?'要確認':`${esc(i.confirmedQuantity)}${esc(i.unit||'')}`}</span>${i.lastConfirmedDate?`<span>確認 ${esc(i.lastConfirmedDate)}</span>`:''}${i.note?`<span>${esc(i.note)}</span>`:''}</div><div class="item-actions">${i.confirmedQuantity!=null?`<button class="primary-small" data-action="use-inventory" data-id="${esc(i.id)}">使用</button>`:''}<button data-action="check-stock" data-id="${esc(i.id)}">在庫を確認</button><button data-action="edit-inventory" data-id="${esc(i.id)}">数量・商品を編集</button><button class="danger-small" data-action="delete-inventory" data-id="${esc(i.id)}">削除</button></div></article>`).join(''):'<div class="empty">該当する在庫はありません</div>'}
 function renderBelongingFilters(){const items=array(state.belongings),category=$('belongings-category'),location=$('belongings-location'),cv=category.value,lv=location.value;const cats=[...new Set(items.map(i=>i.category).filter(Boolean))].sort(),locs=[...new Set(items.map(i=>i.location).filter(Boolean))].sort();category.innerHTML='<option value="">すべてのカテゴリ</option>'+cats.map(v=>`<option value="${esc(v)}">${esc(v)}</option>`).join('');location.innerHTML='<option value="">すべての場所</option>'+locs.map(v=>`<option value="${esc(v)}">${esc(v)}</option>`).join('');category.value=cats.includes(cv)?cv:'';location.value=locs.includes(lv)?lv:'';$('location-options').innerHTML=locs.map(v=>`<option value="${esc(v)}"></option>`).join('')}
 // 現在在庫はinventoryItemIdが設定されている持ち物だけ表示する。数量・単位は
 // 常にinventory側を参照して都度計算し、持ち物側には数量を一切保存しない。
@@ -363,16 +365,36 @@ function addShopping(){const name=$('shopping-name').value.trim();if(!name){show
 // confirmUseInventory・saveBelonging（購入フロー時のみ）が共通で呼ぶ「実際に
 // 在庫/購入履歴/消費履歴/使用ペースを変更する」処理そのものなので、呼び出し元
 // 個別に条件分岐を書かずに、対象イベントだけを漏れなく拾える。
-function recordPurchase(item,qty){state.shopping.purchaseLog.push({id:uid('purchase'),date:today(),productName:item.productName,quantity:qty,unit:item.unit||'',sourceShoppingId:item.id});markSheetsDirty()}
+// inventoryIdは購入品が加算された在庫のID（在庫に連携しない購入はnull）。
+// 旧データの購入履歴には存在しない場合があるため、読み取り側は欠落を前提にする。
+function recordPurchase(item,qty,inventoryId=null){state.shopping.purchaseLog.push({id:uid('purchase'),date:today(),productName:item.productName,quantity:qty,unit:item.unit||'',sourceShoppingId:item.id,inventoryId});markSheetsDirty()}
 function removeShopping(id){state.shopping.shoppingList=state.shopping.shoppingList.filter(i=>i.id!==id)}
+
+// ---- 在庫変動の記録（inventoryLog 新形式） ----
+// 在庫数量を変える操作はすべてここを通して1件ずつ記録する。typeで操作を区別し、
+// 消費量の学習（在庫確認区間）は type==='count' の記録どうしの間だけで行う。
+//   count      … 「在庫を確認」で実際に数えた数量（学習の起点・終点になる唯一の記録）
+//   correction … 「数量・商品を編集」での数量・単位の修正（入力ミス等。消費として学習しない）
+//   use        … 「使用」ボタン（consumptionLogにも従来どおり記録する）
+//   purchase   … 購入品を既存在庫へ加算
+//   create     … 在庫商品の新規登録
+// action/recordTypeは旧かいもの帖の記録との互換用に併記する。旧形式の記録（typeなし）は
+// 学習には一切使わない（2026-08-23以前の記録＋その後の記録なし期間があるため）。
+const STOCK_EVENT_LABELS={count:['在庫確認','在庫調整'],correction:['数量修正','在庫調整'],use:['消費','消費'],purchase:['購入','購入'],create:['新規登録','在庫調整']};
+function logStockEvent(item,type,beforeQuantity,afterQuantity,extra={}){
+  const[action,recordType]=STOCK_EVENT_LABELS[type];
+  const before=beforeQuantity==null?null:Number(beforeQuantity),after=afterQuantity==null?null:Number(afterQuantity);
+  const quantity=type==='use'||type==='purchase'?Math.abs((after??0)-(before??0)):after;
+  state.shopping.inventoryLog.push({id:uid('invlog'),inventoryId:item.id,productName:item.productName,date:today(),createdAt:nowIso(),type,action,recordType,quantity,unit:item.unit||'',beforeQuantity:before,afterQuantity:after,...extra});
+}
 // 在庫への加算処理はここ1か所に集約する。purchaseToInventory()と、
 // 「購入→持ち物」で在庫連携した場合の両方から呼び出し、二重加算を防ぐ。
-function applyInventoryAddition(inventoryId,qty){const item=state.shopping.inventory.find(i=>i.id===inventoryId);if(!item)return;item.confirmedQuantity=(Number(item.confirmedQuantity)||0)+qty;item.lastConfirmedDate=today();markSheetsDirty()}
+function applyInventoryAddition(inventoryId,qty){const item=state.shopping.inventory.find(i=>i.id===inventoryId);if(!item)return;const before=item.confirmedQuantity;item.confirmedQuantity=(Number(item.confirmedQuantity)||0)+qty;item.lastConfirmedDate=today();logStockEvent(item,'purchase',before,item.confirmedQuantity);markSheetsDirty()}
 // 新規在庫商品を1件だけ作成して返す。呼び出し側でapplyInventoryAddition()を
 // 重ねて呼ばないこと（作成時のconfirmedQuantityがそのまま初期在庫になるため、
 // 追加加算すると二重計上になる）。
-function createInventoryItem(productName,qty,unit){const newId=uid('inv');state.shopping.inventory.push({id:newId,productName,confirmedQuantity:qty,unit:unit||null,lastConfirmedDate:today(),category:'consumable',note:''});markSheetsDirty();return newId}
-function purchaseToInventory(id,qty){const item=state.shopping.shoppingList.find(i=>i.id===id);if(!item)return;const existing=state.shopping.inventory.find(i=>norm(i.productName)===norm(item.productName));if(existing){applyInventoryAddition(existing.id,qty);existing.unit=existing.unit||item.unit||null}else state.shopping.inventory.push({id:uid('inv'),productName:item.productName,confirmedQuantity:qty,unit:item.unit||null,lastConfirmedDate:today(),category:'consumable',note:item.note||'買い物リストから登録'});recordPurchase(item,qty);removeShopping(id);persist(`${item.productName}を在庫へ登録しました`)}
+function createInventoryItem(productName,qty,unit,note=''){const newId=uid('inv');const item={id:newId,productName,confirmedQuantity:qty,unit:unit||null,lastConfirmedDate:today(),category:'consumable',note};state.shopping.inventory.push(item);logStockEvent(item,'create',null,qty);markSheetsDirty();return newId}
+function purchaseToInventory(id,qty){const item=state.shopping.shoppingList.find(i=>i.id===id);if(!item)return;const existing=state.shopping.inventory.find(i=>norm(i.productName)===norm(item.productName));let inventoryId;if(existing){existing.unit=existing.unit||item.unit||null;applyInventoryAddition(existing.id,qty);inventoryId=existing.id}else inventoryId=createInventoryItem(item.productName,qty,item.unit||null,item.note||'買い物リストから登録');recordPurchase(item,qty,inventoryId);removeShopping(id);persist(`${item.productName}を在庫へ登録しました`)}
 
 // ---- 使用数量の記録・使用ペース再計算 ----
 // n日前の日付文字列（today()と同じYYYY-MM-DD形式、JST基準のローカル日付）。
@@ -409,10 +431,11 @@ function confirmUseInventory(){
   const raw=$('use-inventory-qty').value,qty=Number(raw);
   if(raw===''||!Number.isFinite(qty)||qty<=0){showToast('使用した数量を入力してください');return}
   if(qty>Number(item.confirmedQuantity)){showToast(`現在在庫（${item.confirmedQuantity}${item.unit||''}）を超える数量は入力できません`);return}
-  const inventoryId=item.id;
+  const inventoryId=item.id,before=item.confirmedQuantity,consumptionLogId=uid('consume');
   item.confirmedQuantity=Math.max(0,Number(item.confirmedQuantity)-qty);
   item.lastConfirmedDate=today();
-  state.shopping.consumptionLog.push({id:uid('consume'),inventoryId,productName:item.productName,quantity:qty,unit:item.unit||'',date:today(),createdAt:nowIso()});
+  state.shopping.consumptionLog.push({id:consumptionLogId,inventoryId,productName:item.productName,quantity:qty,unit:item.unit||'',date:today(),createdAt:nowIso()});
+  logStockEvent(item,'use',before,item.confirmedQuantity,{consumptionLogId});
   markSheetsDirty();
   recalcConsumptionRate(inventoryId);
   closeUseInventoryModal();
@@ -467,12 +490,14 @@ function saveBelonging(){
     if(isPurchaseFlow&&purchaseShop&&purchaseQty>0)finalInventoryId=createInventoryItem(name,purchaseQty,purchaseShop.unit||null);
     else if(!isPurchaseFlow)finalInventoryId=createInventoryItem(name,manualQty,manualUnit);
   }
+  // 購入履歴のinventoryIdは「実際に数量が在庫へ入った」場合だけ設定する（連携しない場合はnull）。
+  const purchasedIntoInventoryId=isPurchaseFlow&&finalInventoryId&&state.shopping.inventory.some(i=>i.id===finalInventoryId)?finalInventoryId:null;
   const values={name,location,category:$('belonging-category-edit').value,detail:$('belonging-detail').value.trim(),inventoryItemId:finalInventoryId,updatedAt:today()};
   if(belongingEditId){const index=state.belongings.findIndex(i=>i.id===belongingEditId);if(index>=0)state.belongings[index]={...state.belongings[index],...values}}
   else state.belongings.push({id:uid('item'),savedAt:today(),...values});
   if(isPurchaseFlow&&purchaseShop&&purchaseQty>0){
     if(!isNewStock&&finalInventoryId)applyInventoryAddition(finalInventoryId,purchaseQty);
-    recordPurchase(purchaseShop,purchaseQty);
+    recordPurchase(purchaseShop,purchaseQty,purchasedIntoInventoryId);
     removeShopping(purchaseShop.id);
   }
   closeBelongingModal();
@@ -480,8 +505,29 @@ function saveBelonging(){
 }
 function closeBelongingModal(){$('belonging-modal').hidden=true;belongingEditId=null;purchaseShoppingId=null;purchaseQtyConfirmed=null}
 function openInventoryModal(id=null){inventoryEditId=id;const item=id?state.shopping.inventory.find(i=>i.id===id):null;$('inventory-modal-title').textContent=id?'在庫を編集':'在庫を追加';$('inventory-name-edit').value=item?.productName||'';$('inventory-qty-edit').value=item?.confirmedQuantity??'';$('inventory-unit-edit').value=item?.unit||'';$('inventory-note-edit').value=item?.note||'';$('inventory-modal').hidden=false;setTimeout(()=>$('inventory-name-edit').focus(),30)}
-function saveInventory(){const name=$('inventory-name-edit').value.trim(),raw=$('inventory-qty-edit').value,qty=Number(raw),wasEdit=!!inventoryEditId;if(!name||raw===''||!Number.isFinite(qty)||qty<0){showToast('商品名と0以上の数量を入力してください');return}const values={productName:name,confirmedQuantity:qty,unit:$('inventory-unit-edit').value.trim()||null,note:$('inventory-note-edit').value.trim()||null,lastConfirmedDate:today()};let savedId=inventoryEditId;if(inventoryEditId){const index=state.shopping.inventory.findIndex(i=>i.id===inventoryEditId);if(index>=0)state.shopping.inventory[index]={...state.shopping.inventory[index],...values}}else{savedId=uid('inv');state.shopping.inventory.push({id:savedId,category:'consumable',...values})}closeInventoryModal();markSheetsDirty();persist(wasEdit?'在庫を更新しました':'在庫を追加しました');maybePromptAddToShopping(state.shopping.inventory.find(i=>i.id===savedId))}
+// 「数量・商品を編集」は商品情報・入力値の修正専用。既存商品の数量や単位が変わった場合は
+// correctionとして記録し、消費量の学習には使わない（実際に数えた数量は「在庫を確認」で記録する）。
+function saveInventory(){const name=$('inventory-name-edit').value.trim(),raw=$('inventory-qty-edit').value,qty=Number(raw),wasEdit=!!inventoryEditId;if(!name||raw===''||!Number.isFinite(qty)||qty<0){showToast('商品名と0以上の数量を入力してください');return}const values={productName:name,confirmedQuantity:qty,unit:$('inventory-unit-edit').value.trim()||null,note:$('inventory-note-edit').value.trim()||null,lastConfirmedDate:today()};let savedId=inventoryEditId;if(inventoryEditId){const index=state.shopping.inventory.findIndex(i=>i.id===inventoryEditId);if(index>=0){const prev=state.shopping.inventory[index];state.shopping.inventory[index]={...prev,...values};const qtyChanged=Number(prev.confirmedQuantity)!==qty||prev.confirmedQuantity==null,unitChanged=(prev.unit||null)!==values.unit;if(qtyChanged||unitChanged)logStockEvent(state.shopping.inventory[index],'correction',prev.confirmedQuantity,qty,unitChanged?{beforeUnit:prev.unit||null}:{})}}else{savedId=uid('inv');const item={id:savedId,category:'consumable',...values};state.shopping.inventory.push(item);logStockEvent(item,'create',null,qty)}closeInventoryModal();markSheetsDirty();persist(wasEdit?'在庫を更新しました':'在庫を追加しました');maybePromptAddToShopping(state.shopping.inventory.find(i=>i.id===savedId))}
 function closeInventoryModal(){$('inventory-modal').hidden=true;inventoryEditId=null}
+// ---- 在庫確認（実際に数えた数量の記録） ----
+// 数量が前回と同じでも必ずcountとして記録する（「変化なし」も消費ペースの実測になるため）。
+let stockCountInventoryId=null;
+function openStockCountModal(id){const item=state.shopping.inventory.find(i=>i.id===id);if(!item)return;stockCountInventoryId=id;$('stock-count-name').textContent=item.productName||'名称未設定';$('stock-count-current').textContent=item.confirmedQuantity==null?'未確認':`${item.confirmedQuantity}${item.unit||''}`;$('stock-count-unit-label').textContent=item.unit||'';$('stock-count-qty').value='';$('stock-count-modal').hidden=false;setTimeout(()=>$('stock-count-qty').focus(),30)}
+function closeStockCountModal(){$('stock-count-modal').hidden=true;stockCountInventoryId=null}
+function confirmStockCount(){
+  const item=state.shopping.inventory.find(i=>i.id===stockCountInventoryId);
+  if(!item)return;
+  const raw=$('stock-count-qty').value,qty=Number(raw);
+  if(raw===''||!Number.isFinite(qty)||qty<0){showToast('実際に数えた数量を入力してください');return}
+  const before=item.confirmedQuantity;
+  item.confirmedQuantity=qty;
+  item.lastConfirmedDate=today();
+  logStockEvent(item,'count',before,qty);
+  markSheetsDirty();
+  closeStockCountModal();
+  persist('在庫確認を記録しました');
+  maybePromptAddToShopping(item);
+}
 // 「在庫を確認」操作後、確定数量が少なければ買い物リストへの追加を提案する。
 // あくまで選択肢を示すだけで、ユーザーがボタンを押さない限り買い物リストは変更しない。
 let stockPromptItem=null;
@@ -509,7 +555,7 @@ function confirmHomeAddShopping(){
   closeHomeAddShoppingModal();
   persist('買うものに追加しました');
 }
-function handleListAction(event){const button=event.target.closest('[data-action]');if(!button)return;const{id,action}=button.dataset;if(action==='buy-inventory')openPurchaseQtyModal(id,'inventory');if(action==='buy-belonging')openPurchaseQtyModal(id,'belonging');if(action==='edit-belonging')openBelongingModal(id);if(action==='edit-inventory')openInventoryModal(id);if(action==='check-stock')openInventoryModal(id);if(action==='use-inventory')openUseInventoryModal(id);if(action==='add-to-shopping-from-home')openHomeAddShoppingModal(id);if(action==='delete-shopping'&&confirm('この買うものを削除しますか？')){removeShopping(id);persist('買うものから削除しました')}if(action==='delete-belonging'&&confirm('この持ち物を削除しますか？')){state.belongings=state.belongings.filter(i=>i.id!==id);persist('持ち物を削除しました')}if(action==='delete-inventory'&&confirm('この在庫を削除しますか？')){state.shopping.inventory=state.shopping.inventory.filter(i=>i.id!==id);markSheetsDirty();persist('在庫を削除しました')}}
+function handleListAction(event){const button=event.target.closest('[data-action]');if(!button)return;const{id,action}=button.dataset;if(action==='buy-inventory')openPurchaseQtyModal(id,'inventory');if(action==='buy-belonging')openPurchaseQtyModal(id,'belonging');if(action==='edit-belonging')openBelongingModal(id);if(action==='edit-inventory')openInventoryModal(id);if(action==='check-stock')openStockCountModal(id);if(action==='use-inventory')openUseInventoryModal(id);if(action==='add-to-shopping-from-home')openHomeAddShoppingModal(id);if(action==='delete-shopping'&&confirm('この買うものを削除しますか？')){removeShopping(id);persist('買うものから削除しました')}if(action==='delete-belonging'&&confirm('この持ち物を削除しますか？')){state.belongings=state.belongings.filter(i=>i.id!==id);persist('持ち物を削除しました')}if(action==='delete-inventory'&&confirm('この在庫を削除しますか？')){state.shopping.inventory=state.shopping.inventory.filter(i=>i.id!==id);markSheetsDirty();persist('在庫を削除しました')}}
 
 function showView(name){document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active',v.id===`view-${name}`));document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===name));window.scrollTo({top:0,behavior:'smooth'});$('main').focus({preventScroll:true})}
 function globalSearch(){const q=norm($('global-search').value),box=$('search-results');if(!q){box.hidden=true;box.innerHTML='';return}const results=[];array(state.shopping.shoppingList).forEach(i=>{if(norm([i.productName,i.note].join(' ')).includes(q))results.push({kind:'買うもの',name:i.productName,meta:i.note||''})});array(state.shopping.inventory).forEach(i=>{if(norm([i.productName,i.note].join(' ')).includes(q))results.push({kind:'在庫',name:i.productName,meta:i.confirmedQuantity==null?'数量要確認':`${i.confirmedQuantity}${i.unit||''}`})});array(state.belongings).forEach(i=>{if(norm([i.name,i.location,i.detail].join(' ')).includes(q))results.push({kind:'持ち物',name:i.name,meta:i.location||''})});box.hidden=false;box.innerHTML=results.length?results.slice(0,20).map(r=>`<div class="result-row"><div class="result-kind">${esc(r.kind)}</div><strong>${esc(r.name||'名称未設定')}</strong>${r.meta?`<div class="meta">${esc(r.meta)}</div>`:''}</div>`).join(''):'<div class="empty">見つかりませんでした</div>'}
@@ -613,7 +659,7 @@ document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>show
 $('global-search').addEventListener('input',globalSearch);$('shopping-search').addEventListener('input',renderShopping);$('shopping-sort').addEventListener('change',renderShopping);$('inventory-search').addEventListener('input',renderInventory);$('inventory-sort').addEventListener('change',renderInventory);$('belongings-search').addEventListener('input',renderBelongings);$('belongings-category').addEventListener('change',renderBelongings);$('belongings-location').addEventListener('change',renderBelongings);$('belongings-sort').addEventListener('change',renderBelongings);
 $('shopping-list').addEventListener('click',handleListAction);$('inventory-list').addEventListener('click',handleListAction);$('belongings-list').addEventListener('click',handleListAction);$('stock-check-list').addEventListener('click',handleListAction);$('next-shopping-candidates-list').addEventListener('click',handleListAction);
 $('add-shopping-btn').addEventListener('click',addShopping);$('add-inventory-btn').addEventListener('click',()=>openInventoryModal());$('add-belonging-btn').addEventListener('click',()=>openBelongingModal());$('home-add-belonging').addEventListener('click',()=>openBelongingModal());
-$('belonging-cancel').addEventListener('click',closeBelongingModal);$('belonging-save').addEventListener('click',saveBelonging);$('belonging-inventory-link').addEventListener('change',updateBelongingNewStockUI);$('inventory-cancel').addEventListener('click',closeInventoryModal);$('inventory-save').addEventListener('click',saveInventory);$('stock-prompt-skip').addEventListener('click',closeStockPrompt);$('stock-prompt-add').addEventListener('click',confirmStockPromptAdd);$('purchase-qty-cancel').addEventListener('click',closePurchaseQtyModal);$('purchase-qty-confirm').addEventListener('click',confirmPurchaseQty);$('use-inventory-cancel').addEventListener('click',closeUseInventoryModal);$('use-inventory-confirm').addEventListener('click',confirmUseInventory);$('home-add-shopping-cancel').addEventListener('click',closeHomeAddShoppingModal);$('home-add-shopping-confirm').addEventListener('click',confirmHomeAddShopping);$('sheets-sync-config-save').addEventListener('click',saveSheetsSyncConfig);$('sheets-sync-btn').addEventListener('click',syncToSheets);$('sheets-auto-sync-toggle').addEventListener('change',toggleSheetsAutoSync);$('next-shopping-date-save').addEventListener('click',saveNextShoppingDate);
+$('belonging-cancel').addEventListener('click',closeBelongingModal);$('belonging-save').addEventListener('click',saveBelonging);$('belonging-inventory-link').addEventListener('change',updateBelongingNewStockUI);$('inventory-cancel').addEventListener('click',closeInventoryModal);$('inventory-save').addEventListener('click',saveInventory);$('stock-prompt-skip').addEventListener('click',closeStockPrompt);$('stock-prompt-add').addEventListener('click',confirmStockPromptAdd);$('purchase-qty-cancel').addEventListener('click',closePurchaseQtyModal);$('purchase-qty-confirm').addEventListener('click',confirmPurchaseQty);$('stock-count-cancel').addEventListener('click',closeStockCountModal);$('stock-count-confirm').addEventListener('click',confirmStockCount);$('use-inventory-cancel').addEventListener('click',closeUseInventoryModal);$('use-inventory-confirm').addEventListener('click',confirmUseInventory);$('home-add-shopping-cancel').addEventListener('click',closeHomeAddShoppingModal);$('home-add-shopping-confirm').addEventListener('click',confirmHomeAddShopping);$('sheets-sync-config-save').addEventListener('click',saveSheetsSyncConfig);$('sheets-sync-btn').addEventListener('click',syncToSheets);$('sheets-auto-sync-toggle').addEventListener('change',toggleSheetsAutoSync);$('next-shopping-date-save').addEventListener('click',saveNextShoppingDate);
 $('migration-confirm').addEventListener('click',importSources);$('migration-later').addEventListener('click',()=>$('migration-modal').hidden=true);
 $('import-sources-btn').addEventListener('click',()=>{if(readJson(KEYS.integrated)&&!confirm('現在の統合データを元アプリのデータで置き換えますか？\n現在の内容は端末内に自動バックアップします。'))return;importSources()});$('refresh-btn').addEventListener('click',()=>{renderAll();showToast('表示を更新しました')});
 $('export-btn').addEventListener('click',exportIntegrated);$('copy-json-btn').addEventListener('click',copyJson);$('json-close').addEventListener('click',()=>$('json-modal').hidden=true);$('json-copy-again').addEventListener('click',copyJson);$('import-source-file-btn').addEventListener('click',()=>$('import-source-file').click());$('import-source-file').addEventListener('change',e=>{const file=e.target.files?.[0];if(file)importSourceFile(file);e.target.value=''});$('import-btn').addEventListener('click',()=>$('import-file').click());$('import-file').addEventListener('change',e=>{const file=e.target.files?.[0];if(file)importFile(file);e.target.value=''});$('clear-integrated-btn').addEventListener('click',clearIntegrated);

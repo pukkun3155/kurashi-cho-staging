@@ -235,7 +235,22 @@
         <label>単位<input id="inventory-unit-edit" placeholder="個、本、袋など"></label>
         <label>メモ<input id="inventory-note-edit" placeholder="任意"></label>
       </div>
+      <p class="muted">ここでの数量変更は「入力ミス等の修正」として記録し、消費ペースの学習には使いません。実際に数えた数量は「在庫を確認」から記録してください。</p>
       <div class="modal-actions"><button id="inventory-cancel">キャンセル</button><button id="inventory-save" class="primary-btn">保存</button></div>
+    </div>
+  </div>
+
+  <div id="stock-count-modal" class="modal-wrap" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="stock-count-title">
+      <h2 id="stock-count-title">在庫を確認</h2>
+      <p><strong id="stock-count-name"></strong></p>
+      <p class="muted">記録上の在庫：<span id="stock-count-current"></span></p>
+      <div class="modal-form">
+        <label>実際に数えた数量<input id="stock-count-qty" type="number" min="0" step="0.1" placeholder="数量を入力してください"></label>
+      </div>
+      <p class="muted">単位：<span id="stock-count-unit-label"></span></p>
+      <p class="muted">前回の在庫確認からの減り方を、消費ペースの計算に使います。</p>
+      <div class="modal-actions"><button id="stock-count-cancel">キャンセル</button><button id="stock-count-confirm" class="primary-btn">この数量で記録</button></div>
     </div>
   </div>
 
